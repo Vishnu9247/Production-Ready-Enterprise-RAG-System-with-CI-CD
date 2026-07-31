@@ -169,7 +169,7 @@ jobs:
             org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Synchronize Container App secrets
         id: runtime-secrets
