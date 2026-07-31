@@ -1,6 +1,8 @@
 import unittest
 from types import SimpleNamespace
 
+from pydantic import BaseModel
+
 from Backend.rag_app.core.config import Settings
 from Backend.rag_app.embedding_generation.service import AzureOpenAIService
 
@@ -16,6 +18,17 @@ class FakeEmbeddings:
             for index, _ in enumerate(kwargs["input"])
         ]
         return SimpleNamespace(data=data)
+
+
+class StructuredPayload(BaseModel):
+    value: str
+
+
+class FakeParser:
+    def parse(self, **kwargs):
+        self.kwargs = kwargs
+        message = SimpleNamespace(parsed=StructuredPayload(value="ok"))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 class AzureOpenAIServiceTests(unittest.TestCase):
@@ -36,6 +49,22 @@ class AzureOpenAIServiceTests(unittest.TestCase):
         service = AzureOpenAIService(Settings(_env_file=None), client=fake_client)
         with self.assertRaises(ValueError):
             service.embed_query("  ")
+
+    def test_structured_completion_uses_pydantic_response_model(self) -> None:
+        parser = FakeParser()
+        fake_client = SimpleNamespace(
+            embeddings=FakeEmbeddings(),
+            beta=SimpleNamespace(chat=SimpleNamespace(completions=parser)),
+        )
+        service = AzureOpenAIService(Settings(_env_file=None), client=fake_client)
+
+        result = service.complete_structured(
+            [{"role": "user", "content": "Return a value"}],
+            StructuredPayload,
+        )
+
+        self.assertEqual(result.value, "ok")
+        self.assertIs(parser.kwargs["response_format"], StructuredPayload)
 
 
 if __name__ == "__main__":

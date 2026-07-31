@@ -1,0 +1,290 @@
+name: Build, Push, and Deploy Backend
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Backend CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-container-app
+  cancel-in-progress: false
+
+jobs:
+  build-push-deploy:
+    name: Build, push, and deploy
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: Production
+
+    env:
+      AZURE_CORE_OUTPUT: none
+      IMAGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      AZURE_CONTAINER_REGISTRY_NAME: ${{ vars.AZURE_CONTAINER_REGISTRY_NAME }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_CONTAINER_APP_NAME: ${{ vars.AZURE_CONTAINER_APP_NAME }}
+      CONTAINER_IMAGE_NAME: ${{ vars.CONTAINER_IMAGE_NAME || 'enterprise-rag-api' }}
+
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '2024-10-21' }}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}
+      AZURE_OPENAI_CHAT_DEPLOYMENT: ${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}
+      EMBEDDING_DIMENSIONS: ${{ vars.EMBEDDING_DIMENSIONS || '1536' }}
+      EMBEDDING_BATCH_SIZE: ${{ vars.EMBEDDING_BATCH_SIZE || '64' }}
+
+      PINECONE_HOST: ${{ vars.PINECONE_HOST }}
+      PINECONE_INDEX_NAME: ${{ vars.PINECONE_INDEX_NAME || 'enterprise-rag' }}
+      PINECONE_NAMESPACE: ${{ vars.PINECONE_NAMESPACE || 'default' }}
+      PINECONE_HISTORY_NAMESPACE: ${{ vars.PINECONE_HISTORY_NAMESPACE || 'conversation-history' }}
+      PINECONE_CLOUD: ${{ vars.PINECONE_CLOUD || 'aws' }}
+      PINECONE_REGION: ${{ vars.PINECONE_REGION }}
+      PINECONE_METRIC: ${{ vars.PINECONE_METRIC || 'cosine' }}
+
+      POSTGRES_HOST: ${{ vars.POSTGRES_HOST }}
+      POSTGRES_PORT: ${{ vars.POSTGRES_PORT || '5432' }}
+      POSTGRES_DATABASE: ${{ vars.POSTGRES_DATABASE }}
+      POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+      POSTGRES_SSLMODE: ${{ vars.POSTGRES_SSLMODE || 'require' }}
+      POSTGRES_POOL_SIZE: ${{ vars.POSTGRES_POOL_SIZE || '5' }}
+      POSTGRES_MAX_OVERFLOW: ${{ vars.POSTGRES_MAX_OVERFLOW || '10' }}
+
+      OBJECT_STORAGE_PROVIDER: ${{ vars.OBJECT_STORAGE_PROVIDER || 'azure_blob' }}
+      AZURE_STORAGE_ACCOUNT_URL: ${{ vars.AZURE_STORAGE_ACCOUNT_URL }}
+      AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
+      AZURE_STORAGE_PREFIX: ${{ vars.AZURE_STORAGE_PREFIX || 'documents' }}
+
+      CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+      CHUNK_SIZE: ${{ vars.CHUNK_SIZE || '1800' }}
+      CHUNK_OVERLAP: ${{ vars.CHUNK_OVERLAP || '200' }}
+      RETRIEVAL_TOP_K: ${{ vars.RETRIEVAL_TOP_K || '5' }}
+      RETRIEVAL_SCORE_THRESHOLD: ${{ vars.RETRIEVAL_SCORE_THRESHOLD }}
+      KEYWORD_SEARCH_TOP_K: ${{ vars.KEYWORD_SEARCH_TOP_K || '20' }}
+      SEMANTIC_SEARCH_TOP_K: ${{ vars.SEMANTIC_SEARCH_TOP_K || '20' }}
+      HYBRID_RRF_K: ${{ vars.HYBRID_RRF_K || '60' }}
+      RERANK_CANDIDATE_COUNT: ${{ vars.RERANK_CANDIDATE_COUNT || '12' }}
+      RERANK_TOP_K: ${{ vars.RERANK_TOP_K || '5' }}
+      HISTORY_DEFAULT_MESSAGES: ${{ vars.HISTORY_DEFAULT_MESSAGES || '6' }}
+      HISTORY_MAX_MESSAGES: ${{ vars.HISTORY_MAX_MESSAGES || '20' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.IMAGE_SHA }}
+
+      - name: Validate deployment configuration
+        shell: bash
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          missing=()
+          required_variables=(
+            AZURE_CONTAINER_REGISTRY_NAME
+            AZURE_RESOURCE_GROUP
+            AZURE_CONTAINER_APP_NAME
+            AZURE_OPENAI_ENDPOINT
+            AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+            AZURE_OPENAI_CHAT_DEPLOYMENT
+            PINECONE_HOST
+            PINECONE_REGION
+            POSTGRES_HOST
+            POSTGRES_DATABASE
+            POSTGRES_USER
+            AZURE_STORAGE_ACCOUNT_URL
+            AZURE_STORAGE_CONTAINER
+            CORS_ALLOWED_ORIGINS
+          )
+          for variable in "${required_variables[@]}"; do
+            if [[ -z "${!variable}" ]]; then
+              missing+=("$variable")
+            fi
+          done
+          [[ -n "$AZURE_CREDENTIALS" ]] || missing+=("AZURE_CREDENTIALS secret")
+          [[ -n "$AZURE_OPENAI_API_KEY" ]] || missing+=("AZURE_OPENAI_API_KEY secret")
+          [[ -n "$PINECONE_API_KEY" ]] || missing+=("PINECONE_API_KEY secret")
+          [[ -n "$POSTGRES_PASSWORD" ]] || missing+=("POSTGRES_PASSWORD secret")
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing required GitHub configuration: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Log in to Azure with service principal
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Azure Container Apps CLI extension
+        shell: bash
+        run: az extension add --name containerapp --upgrade
+
+      - name: Resolve and validate Azure resources
+        id: azure
+        shell: bash
+        run: |
+          login_server="$(az acr show \
+            --name "$AZURE_CONTAINER_REGISTRY_NAME" \
+            --query loginServer \
+            --output tsv)"
+          az containerapp show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output none
+          echo "login-server=$login_server" >> "$GITHUB_OUTPUT"
+          echo "image=$login_server/$CONTAINER_IMAGE_NAME:$IMAGE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Log Docker in to ACR
+        shell: bash
+        run: az acr login --name "$AZURE_CONTAINER_REGISTRY_NAME"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.azure.outputs.login-server }}/${{ env.CONTAINER_IMAGE_NAME }}:${{ env.IMAGE_SHA }}
+            ${{ steps.azure.outputs.login-server }}/${{ env.CONTAINER_IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Synchronize Container App secrets
+        id: runtime-secrets
+        shell: bash
+        env:
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          AZURE_STORAGE_ACCOUNT_KEY: ${{ secrets.AZURE_STORAGE_ACCOUNT_KEY }}
+          AZURE_STORAGE_SAS_TOKEN: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
+        run: |
+          secret_values=(
+            "azure-openai-api-key=$AZURE_OPENAI_API_KEY"
+            "pinecone-api-key=$PINECONE_API_KEY"
+            "postgres-password=$POSTGRES_PASSWORD"
+          )
+          blob_env=""
+          if [[ -n "$AZURE_STORAGE_CONNECTION_STRING" ]]; then
+            secret_values+=("azure-storage-connection-string=$AZURE_STORAGE_CONNECTION_STRING")
+            blob_env="AZURE_STORAGE_CONNECTION_STRING=secretref:azure-storage-connection-string"
+          elif [[ -n "$AZURE_STORAGE_ACCOUNT_KEY" ]]; then
+            secret_values+=("azure-storage-account-key=$AZURE_STORAGE_ACCOUNT_KEY")
+            blob_env="AZURE_STORAGE_ACCOUNT_KEY=secretref:azure-storage-account-key"
+          elif [[ -n "$AZURE_STORAGE_SAS_TOKEN" ]]; then
+            secret_values+=("azure-storage-sas-token=$AZURE_STORAGE_SAS_TOKEN")
+            blob_env="AZURE_STORAGE_SAS_TOKEN=secretref:azure-storage-sas-token"
+          fi
+          az containerapp secret set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --secrets "${secret_values[@]}" \
+            --output none
+          echo "blob-env=$blob_env" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy image and runtime configuration
+        id: deploy
+        shell: bash
+        env:
+          IMAGE: ${{ steps.azure.outputs.image }}
+          BLOB_CREDENTIAL_ENV: ${{ steps.runtime-secrets.outputs.blob-env }}
+        run: |
+          runtime_env=(
+            "ENVIRONMENT=production"
+            "PORT=8000"
+            "AUTO_INIT_DB=true"
+            "AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT"
+            "AZURE_OPENAI_API_KEY=secretref:azure-openai-api-key"
+            "AZURE_OPENAI_API_VERSION=$AZURE_OPENAI_API_VERSION"
+            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT=$AZURE_OPENAI_EMBEDDING_DEPLOYMENT"
+            "AZURE_OPENAI_CHAT_DEPLOYMENT=$AZURE_OPENAI_CHAT_DEPLOYMENT"
+            "EMBEDDING_DIMENSIONS=$EMBEDDING_DIMENSIONS"
+            "EMBEDDING_BATCH_SIZE=$EMBEDDING_BATCH_SIZE"
+            "PINECONE_API_KEY=secretref:pinecone-api-key"
+            "PINECONE_HOST=$PINECONE_HOST"
+            "PINECONE_INDEX_NAME=$PINECONE_INDEX_NAME"
+            "PINECONE_NAMESPACE=$PINECONE_NAMESPACE"
+            "PINECONE_HISTORY_NAMESPACE=$PINECONE_HISTORY_NAMESPACE"
+            "PINECONE_CLOUD=$PINECONE_CLOUD"
+            "PINECONE_REGION=$PINECONE_REGION"
+            "PINECONE_METRIC=$PINECONE_METRIC"
+            "POSTGRES_HOST=$POSTGRES_HOST"
+            "POSTGRES_PORT=$POSTGRES_PORT"
+            "POSTGRES_DATABASE=$POSTGRES_DATABASE"
+            "POSTGRES_USER=$POSTGRES_USER"
+            "POSTGRES_PASSWORD=secretref:postgres-password"
+            "POSTGRES_SSLMODE=$POSTGRES_SSLMODE"
+            "POSTGRES_POOL_SIZE=$POSTGRES_POOL_SIZE"
+            "POSTGRES_MAX_OVERFLOW=$POSTGRES_MAX_OVERFLOW"
+            "OBJECT_STORAGE_PROVIDER=$OBJECT_STORAGE_PROVIDER"
+            "AZURE_STORAGE_ACCOUNT_URL=$AZURE_STORAGE_ACCOUNT_URL"
+            "AZURE_STORAGE_CONTAINER=$AZURE_STORAGE_CONTAINER"
+            "AZURE_STORAGE_PREFIX=$AZURE_STORAGE_PREFIX"
+            "CORS_ALLOWED_ORIGINS=$CORS_ALLOWED_ORIGINS"
+            "CHUNK_SIZE=$CHUNK_SIZE"
+            "CHUNK_OVERLAP=$CHUNK_OVERLAP"
+            "RETRIEVAL_TOP_K=$RETRIEVAL_TOP_K"
+            "KEYWORD_SEARCH_TOP_K=$KEYWORD_SEARCH_TOP_K"
+            "SEMANTIC_SEARCH_TOP_K=$SEMANTIC_SEARCH_TOP_K"
+            "HYBRID_RRF_K=$HYBRID_RRF_K"
+            "RERANK_CANDIDATE_COUNT=$RERANK_CANDIDATE_COUNT"
+            "RERANK_TOP_K=$RERANK_TOP_K"
+            "HISTORY_DEFAULT_MESSAGES=$HISTORY_DEFAULT_MESSAGES"
+            "HISTORY_MAX_MESSAGES=$HISTORY_MAX_MESSAGES"
+          )
+          [[ -n "$RETRIEVAL_SCORE_THRESHOLD" ]] \
+            && runtime_env+=("RETRIEVAL_SCORE_THRESHOLD=$RETRIEVAL_SCORE_THRESHOLD")
+          [[ -n "$BLOB_CREDENTIAL_ENV" ]] \
+            && runtime_env+=("$BLOB_CREDENTIAL_ENV")
+
+          revision="$(az containerapp update \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "$IMAGE" \
+            --set-env-vars "${runtime_env[@]}" \
+            --query properties.latestRevisionName \
+            --output tsv)"
+          fqdn="$(az containerapp show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv)"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "fqdn=$fqdn" >> "$GITHUB_OUTPUT"
+
+      - name: Publish deployment details
+        shell: bash
+        env:
+          IMAGE: ${{ steps.azure.outputs.image }}
+          REVISION: ${{ steps.deploy.outputs.revision }}
+          FQDN: ${{ steps.deploy.outputs.fqdn }}
+        run: |
+          {
+            echo "### Azure Container Apps deployment"
+            echo
+            echo "- Image: \`$IMAGE\`"
+            echo "- Container App: \`$AZURE_CONTAINER_APP_NAME\`"
+            echo "- Revision: \`$REVISION\`"
+            if [[ -n "$FQDN" ]]; then
+              echo "- API: https://$FQDN"
+              echo "- Health: https://$FQDN/health"
+              echo "- OpenAPI: https://$FQDN/docs"
+            else
+              echo "- Ingress FQDN: not configured"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

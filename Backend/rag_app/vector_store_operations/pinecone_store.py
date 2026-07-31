@@ -6,7 +6,7 @@ from typing import Any
 from pinecone import Pinecone, ServerlessSpec
 
 from ..core.config import Settings
-from ..core.schemas import Chunk, SearchResult
+from ..core.schemas import Chunk, ConversationMessage, SearchResult
 from ..embedding_generation.service import AzureOpenAIService
 
 
@@ -131,6 +131,49 @@ class PineconeVectorStore:
                     SearchResult(chunk_id=str(match.id), score=score, text=text, metadata=metadata)
                 )
         return results
+
+    def upsert_history_messages(
+        self,
+        messages: Iterable[ConversationMessage],
+        *,
+        namespace: str | None = None,
+    ) -> int:
+        items = list(messages)
+        if not items:
+            return 0
+        vectors = self.embeddings.embed_documents(message.content for message in items)
+        self.ensure_index().upsert(
+            vectors=[
+                {
+                    "id": message.message_id,
+                    "values": vector,
+                    "metadata": {
+                        "text": message.content,
+                        "session_id": message.session_id,
+                        "role": message.role,
+                        "created_at": message.created_at.isoformat(),
+                        "resolved_query": message.resolved_query or "",
+                    },
+                }
+                for message, vector in zip(items, vectors, strict=True)
+            ],
+            namespace=namespace or self.settings.pinecone_history_namespace,
+        )
+        return len(items)
+
+    def query_history(
+        self,
+        query_text: str,
+        *,
+        session_id: str,
+        top_k: int,
+    ) -> list[SearchResult]:
+        return self.query(
+            query_text,
+            top_k=top_k,
+            namespace=self.settings.pinecone_history_namespace,
+            metadata_filter={"session_id": {"$eq": session_id}},
+        )
 
     def update_metadata(
         self, vector_id: str, metadata: dict[str, Any], *, namespace: str | None = None

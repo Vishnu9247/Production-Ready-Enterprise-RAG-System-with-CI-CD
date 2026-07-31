@@ -13,6 +13,9 @@ from ..core.schemas import (
     KeywordSearchRequest,
     QueryRequest,
     SearchResult,
+    SessionCreateRequest,
+    SessionHistoryResponse,
+    SessionResponse,
 )
 from .service import RAGService
 
@@ -49,13 +52,25 @@ def ingest_uploaded_document(
 
 def answer_query(service: RAGService, request: QueryRequest) -> Answer:
     return service.answer(
-        request.question,
+        request.session_id,
+        request.query,
         top_k=request.top_k,
-        namespace=request.namespace,
         metadata_filter=request.metadata_filter,
         score_threshold=request.score_threshold,
         search_mode=request.search_mode,
     )
+
+
+def create_session(
+    service: RAGService, request: SessionCreateRequest
+) -> SessionResponse:
+    return service.create_session(request.name, request.namespace)
+
+
+def get_session_history(
+    service: RAGService, session_id: str, limit: int | None = None
+) -> SessionHistoryResponse:
+    return service.get_session_history(session_id, limit=limit)
 
 
 def keyword_search(

@@ -10,6 +10,7 @@ dependencies = [
     "docling>=2.110.0",
     "fastapi>=0.116.0",
     "ipykernel>=7.3.0",
+    "langgraph>=1.2.9,<2.0.0",
     "liteparse>=2.5.1",
     "markitdown>=0.1.6",
     "openai>=2.44.0",

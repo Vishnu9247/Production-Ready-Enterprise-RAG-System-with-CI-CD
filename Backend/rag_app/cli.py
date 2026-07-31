@@ -65,10 +65,14 @@ def main() -> None:
         if args.command == "ingest":
             result = service.ingest_pdf(args.pdf, namespace=args.namespace).model_dump()
         elif args.command == "query":
+            session = service.create_session(
+                "CLI session",
+                args.namespace or settings.pinecone_namespace,
+            )
             result = service.answer(
+                session.session_id,
                 args.question,
                 top_k=args.top_k,
-                namespace=args.namespace,
                 search_mode=args.search_mode,
             ).model_dump()
         elif args.command == "keyword-search":

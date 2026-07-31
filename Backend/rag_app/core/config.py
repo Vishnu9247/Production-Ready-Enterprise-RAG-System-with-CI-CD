@@ -21,10 +21,11 @@ class Settings(BaseSettings):
     app_name: str = "Enterprise RAG API"
     environment: str = "development"
     data_directory: Path = Path("Backend/data")
+    cors_allowed_origins: str = "http://localhost:5173"
 
     azure_openai_endpoint: str = ""
     azure_openai_api_key: SecretStr = Field(default=SecretStr(""))
-    azure_openai_api_version: str = "2024-02-01"
+    azure_openai_api_version: str = "2024-10-21"
     azure_openai_embedding_deployment: str = "text-embedding-3-small"
     azure_openai_chat_deployment: str = "gpt-4o-mini"
     embedding_dimensions: int = Field(default=1536, gt=0)
@@ -37,6 +38,7 @@ class Settings(BaseSettings):
     pinecone_cloud: str = "aws"
     pinecone_region: str = "us-east-1"
     pinecone_metric: str = "cosine"
+    pinecone_history_namespace: str = "conversation-history"
 
     postgres_host: str = ""
     postgres_port: int = Field(default=5432, ge=1, le=65535)
@@ -62,6 +64,18 @@ class Settings(BaseSettings):
     keyword_search_top_k: int = Field(default=20, ge=1, le=100)
     semantic_search_top_k: int = Field(default=20, ge=1, le=100)
     hybrid_rrf_k: int = Field(default=60, ge=1)
+    rerank_candidate_count: int = Field(default=12, ge=1, le=50)
+    rerank_top_k: int = Field(default=5, ge=1, le=20)
+    history_default_messages: int = Field(default=6, ge=1, le=50)
+    history_max_messages: int = Field(default=20, ge=1, le=100)
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.cors_allowed_origins.split(",")
+            if origin.strip()
+        ]
 
     def require_azure(self) -> None:
         missing = []

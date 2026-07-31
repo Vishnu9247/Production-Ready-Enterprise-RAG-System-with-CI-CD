@@ -3,7 +3,8 @@ import unittest
 import uuid
 
 from Backend.rag_app.core.config import Settings
-from Backend.rag_app.core.schemas import Chunk
+from Backend.rag_app.core.schemas import Chunk, Reference
+from Backend.rag_app.database.conversation_repository import ConversationRepository
 from Backend.rag_app.database.repository import PostgresDocumentRepository
 
 
@@ -43,6 +44,36 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertEqual(results[0].chunk_id, chunks[0].chunk_id)
         finally:
             repository.delete_document(document_id)
+
+    def test_session_and_message_history_persistence(self) -> None:
+        settings = Settings(_env_file=None)
+        documents = PostgresDocumentRepository(settings)
+        documents.initialize_schema()
+        conversations = ConversationRepository(
+            settings, documents.session_factory
+        )
+        session = conversations.create_session("Integration", "test")
+        try:
+            conversations.append_exchange(
+                session_id=session.session_id,
+                query="What changed?",
+                resolved_query="What changed in the report?",
+                answer="Revenue increased [1].",
+                reason="The cited chunk reports an increase.",
+                references=[
+                    Reference(
+                        number=1,
+                        chunk_id="chunk-1",
+                        document_name="report.pdf",
+                        score=0.9,
+                    )
+                ],
+            )
+            history = conversations.list_messages(session.session_id, limit=10)
+            self.assertEqual([message.role for message in history], ["user", "assistant"])
+            self.assertEqual(history[1].references[0].document_name, "report.pdf")
+        finally:
+            conversations.delete_session(session.session_id)
 
 
 if __name__ == "__main__":
