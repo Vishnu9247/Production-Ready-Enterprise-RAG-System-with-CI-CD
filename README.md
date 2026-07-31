@@ -19,7 +19,7 @@ The project contains a React frontend, a FastAPI backend, cloud storage, hybrid 
 ### 1. Document ingestion
 
 1. The frontend uploads a PDF to the FastAPI backend.
-2. Docling extracts text, headings, tables, images, and page information.
+2. LlamaCloud Parse extracts text, headings, tables, images, and page information.
 3. The extracted content is split into smaller chunks.
 4. Azure OpenAI creates an embedding for every chunk.
 5. The original PDF is stored in Azure Blob Storage.
@@ -46,7 +46,7 @@ Use the same namespace when uploading documents and creating a session. For exam
 | React and Vite | Provides the document upload and chat interface. |
 | FastAPI | Exposes the backend REST API. |
 | LangGraph | Runs the multi-step question-answering workflow. |
-| Docling | Extracts structured content from PDF files. |
+| LlamaCloud Parse | Extracts structured content from PDF files using a hosted parsing service. |
 | Azure OpenAI embeddings | Converts document chunks and messages into vectors. |
 | Azure OpenAI chat | Rewrites incomplete questions, reranks context, and generates answers. |
 | Pinecone | Stores vectors and performs semantic search. It also stores conversation-history vectors in a separate namespace. |
@@ -104,6 +104,8 @@ The main settings are:
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Name of the deployed embedding model. |
 | `AZURE_OPENAI_CHAT_DEPLOYMENT` | Name of the deployed chat model. |
 | `EMBEDDING_DIMENSIONS` | Must match the dimension used by the Pinecone index. |
+| `LLAMA_CLOUD_API_KEY` | API key used to upload and parse documents with LlamaCloud. |
+| `LLAMA_PARSE_TIER` | Parsing tier: `fast`, `cost_effective`, `agentic`, or `agentic_plus`. |
 | `PINECONE_API_KEY` | Pinecone API key. |
 | `PINECONE_HOST` | Host of the existing Pinecone index. |
 | `PINECONE_NAMESPACE` | Default namespace for document vectors. |
@@ -124,6 +126,7 @@ Add these under **GitHub repository > Settings > Secrets and variables > Actions
 | Secret | Purpose |
 |---|---|
 | `AZURE_OPENAI_API_KEY` | Authenticates with Azure OpenAI. |
+| `LLAMA_CLOUD_API_KEY` | Authenticates with LlamaCloud Parse. |
 | `PINECONE_API_KEY` | Authenticates with Pinecone. |
 | `POSTGRES_PASSWORD` | Password for the PostgreSQL application user. |
 | `AZURE_STORAGE_CONNECTION_STRING` | Optional Blob credential. Use only one of the supported Blob credential secrets. |
@@ -168,6 +171,9 @@ Common optional variables:
 | `CONTAINER_IMAGE_NAME` | `enterprise-rag-api` |
 | `AZURE_OPENAI_API_VERSION` | `2024-10-21` |
 | `EMBEDDING_DIMENSIONS` | `1536` |
+| `LLAMA_PARSE_TIER` | `agentic` |
+| `LLAMA_PARSE_VERSION` | `latest` |
+| `LLAMA_PARSE_TIMEOUT_SECONDS` | `600` |
 | `PINECONE_INDEX_NAME` | `enterprise-rag` |
 | `PINECONE_NAMESPACE` | `default` |
 | `PINECONE_HISTORY_NAMESPACE` | `conversation-history` |
@@ -177,6 +183,8 @@ Common optional variables:
 | `POSTGRES_SSLMODE` | `require` |
 | `OBJECT_STORAGE_PROVIDER` | `azure_blob` |
 | `AZURE_STORAGE_PREFIX` | `documents` |
+
+`LLAMA_CLOUD_ORGANIZATION_ID` and `LLAMA_CLOUD_PROJECT_ID` are optional repository variables. Add them only if your API key can access multiple organizations or projects and you need to select one explicitly.
 
 Chunking, retrieval, reranking, history, and database pool settings are also optional. Their names and defaults are listed in `Backend/.env.example`.
 
@@ -293,6 +301,7 @@ Before deploying, make sure:
 - The Container App can pull images from Azure Container Registry.
 - PostgreSQL allows network access from the Container Apps environment.
 - The Pinecone index dimension matches `EMBEDDING_DIMENSIONS`.
+- The Container App has outbound HTTPS access to the LlamaCloud API.
 - Blob Storage credentials or managed-identity permissions are configured.
 - `CORS_ALLOWED_ORIGINS` contains the frontend URL.
 

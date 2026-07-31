@@ -49,7 +49,17 @@ def main() -> None:
     args = build_parser().parse_args()
     settings = get_settings()
     if args.command == "extract":
-        result = extract_document(args.pdf, args.output)
+        settings.require_llama_cloud()
+        result = extract_document(
+            args.pdf,
+            args.output,
+            api_key=settings.llama_cloud_api_key.get_secret_value(),
+            tier=settings.llama_parse_tier,
+            version=settings.llama_parse_version,
+            timeout_seconds=settings.llama_parse_timeout_seconds,
+            organization_id=settings.llama_cloud_organization_id or None,
+            project_id=settings.llama_cloud_project_id or None,
+        )
     elif args.command == "chunk":
         result = [chunk.model_dump() for chunk in chunk_document(
             args.document_directory,

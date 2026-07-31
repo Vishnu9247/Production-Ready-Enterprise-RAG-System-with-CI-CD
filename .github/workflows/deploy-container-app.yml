@@ -38,6 +38,12 @@ jobs:
       EMBEDDING_DIMENSIONS: ${{ vars.EMBEDDING_DIMENSIONS || '1536' }}
       EMBEDDING_BATCH_SIZE: ${{ vars.EMBEDDING_BATCH_SIZE || '64' }}
 
+      LLAMA_CLOUD_ORGANIZATION_ID: ${{ vars.LLAMA_CLOUD_ORGANIZATION_ID }}
+      LLAMA_CLOUD_PROJECT_ID: ${{ vars.LLAMA_CLOUD_PROJECT_ID }}
+      LLAMA_PARSE_TIER: ${{ vars.LLAMA_PARSE_TIER || 'agentic' }}
+      LLAMA_PARSE_VERSION: ${{ vars.LLAMA_PARSE_VERSION || 'latest' }}
+      LLAMA_PARSE_TIMEOUT_SECONDS: ${{ vars.LLAMA_PARSE_TIMEOUT_SECONDS || '600' }}
+
       PINECONE_HOST: ${{ vars.PINECONE_HOST }}
       PINECONE_INDEX_NAME: ${{ vars.PINECONE_INDEX_NAME || 'enterprise-rag' }}
       PINECONE_NAMESPACE: ${{ vars.PINECONE_NAMESPACE || 'default' }}
@@ -83,6 +89,7 @@ jobs:
         env:
           AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          LLAMA_CLOUD_API_KEY: ${{ secrets.LLAMA_CLOUD_API_KEY }}
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
@@ -110,6 +117,7 @@ jobs:
           done
           [[ -n "$AZURE_CREDENTIALS" ]] || missing+=("AZURE_CREDENTIALS secret")
           [[ -n "$AZURE_OPENAI_API_KEY" ]] || missing+=("AZURE_OPENAI_API_KEY secret")
+          [[ -n "$LLAMA_CLOUD_API_KEY" ]] || missing+=("LLAMA_CLOUD_API_KEY secret")
           [[ -n "$PINECONE_API_KEY" ]] || missing+=("PINECONE_API_KEY secret")
           [[ -n "$POSTGRES_PASSWORD" ]] || missing+=("POSTGRES_PASSWORD secret")
           if (( ${#missing[@]} > 0 )); then
@@ -168,6 +176,7 @@ jobs:
         shell: bash
         env:
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          LLAMA_CLOUD_API_KEY: ${{ secrets.LLAMA_CLOUD_API_KEY }}
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
@@ -176,6 +185,7 @@ jobs:
         run: |
           secret_values=(
             "azure-openai-api-key=$AZURE_OPENAI_API_KEY"
+            "llama-cloud-api-key=$LLAMA_CLOUD_API_KEY"
             "pinecone-api-key=$PINECONE_API_KEY"
             "postgres-password=$POSTGRES_PASSWORD"
           )
@@ -215,6 +225,12 @@ jobs:
             "AZURE_OPENAI_CHAT_DEPLOYMENT=$AZURE_OPENAI_CHAT_DEPLOYMENT"
             "EMBEDDING_DIMENSIONS=$EMBEDDING_DIMENSIONS"
             "EMBEDDING_BATCH_SIZE=$EMBEDDING_BATCH_SIZE"
+            "LLAMA_CLOUD_API_KEY=secretref:llama-cloud-api-key"
+            "LLAMA_CLOUD_ORGANIZATION_ID=$LLAMA_CLOUD_ORGANIZATION_ID"
+            "LLAMA_CLOUD_PROJECT_ID=$LLAMA_CLOUD_PROJECT_ID"
+            "LLAMA_PARSE_TIER=$LLAMA_PARSE_TIER"
+            "LLAMA_PARSE_VERSION=$LLAMA_PARSE_VERSION"
+            "LLAMA_PARSE_TIMEOUT_SECONDS=$LLAMA_PARSE_TIMEOUT_SECONDS"
             "PINECONE_API_KEY=secretref:pinecone-api-key"
             "PINECONE_HOST=$PINECONE_HOST"
             "PINECONE_INDEX_NAME=$PINECONE_INDEX_NAME"
