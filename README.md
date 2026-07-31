@@ -1,127 +1,238 @@
 # Production-Ready Enterprise RAG System
 
-The backend implements a PDF RAG pipeline using Docling, Azure OpenAI,
-Azure Blob Storage, PostgreSQL, and Pinecone:
+![Enterprise RAG system architecture](docs/assets/enterprise-rag-architecture.png)
 
-1. Extract PDF text, headings, tables, images, page numbers, and bounding boxes.
-2. Build deterministic, structure-aware chunks with source metadata.
-3. Create embeddings in batches with an Azure OpenAI embedding deployment.
-4. Store original PDFs in Azure Blob Storage.
-5. Store document records and authoritative chunk text in PostgreSQL.
-6. Upsert embeddings into an existing Pinecone host or create an index by name.
-7. Fuse Pinecone semantic search with PostgreSQL full-text keyword search.
-8. Use a bounded LangGraph workflow to complete contextual questions, retrieve,
-   deduplicate, rerank, and generate a grounded answer.
-9. Store sessions and message history in PostgreSQL and mirror message
-   embeddings into a separate Pinecone history namespace.
+## Project overview
 
-## Backend layout
+This project is a Retrieval-Augmented Generation (RAG) application for asking questions about PDF documents.
+
+Users can upload PDFs, create a chat session, and ask questions. The backend searches the uploaded documents and asks Azure OpenAI to create an answer grounded in the retrieved content. Each answer contains:
+
+- A direct answer
+- A short reason
+- References to the source document and pages
+
+The project contains a React frontend, a FastAPI backend, cloud storage, hybrid search, conversation history, and an automated Azure deployment workflow.
+
+## How the architecture works
+
+### 1. Document ingestion
+
+1. The frontend uploads a PDF to the FastAPI backend.
+2. Docling extracts text, headings, tables, images, and page information.
+3. The extracted content is split into smaller chunks.
+4. Azure OpenAI creates an embedding for every chunk.
+5. The original PDF is stored in Azure Blob Storage.
+6. PostgreSQL stores the document, chunk text, and metadata.
+7. Pinecone stores the chunk embeddings for semantic search.
+
+### 2. Question answering
+
+1. The user creates a session and sends a question.
+2. LangGraph checks whether the question has enough context.
+3. If needed, the question is rewritten using recent session history.
+4. Pinecone performs semantic search.
+5. PostgreSQL performs keyword search.
+6. The results are combined, duplicates are removed, and the best chunks are reranked.
+7. Azure OpenAI creates a grounded answer from those chunks.
+8. The answer, reason, references, and conversation history are returned to the frontend.
+
+Use the same namespace when uploading documents and creating a session. For example, documents uploaded to `production` can be queried by sessions created with the `production` namespace.
+
+## Technology and services
+
+| Technology or service | Purpose |
+|---|---|
+| React and Vite | Provides the document upload and chat interface. |
+| FastAPI | Exposes the backend REST API. |
+| LangGraph | Runs the multi-step question-answering workflow. |
+| Docling | Extracts structured content from PDF files. |
+| Azure OpenAI embeddings | Converts document chunks and messages into vectors. |
+| Azure OpenAI chat | Rewrites incomplete questions, reranks context, and generates answers. |
+| Pinecone | Stores vectors and performs semantic search. It also stores conversation-history vectors in a separate namespace. |
+| Azure Database for PostgreSQL | Stores documents, chunks, sessions, messages, and supports keyword search. |
+| Azure Blob Storage | Stores the original uploaded PDF files. |
+| Docker | Packages the backend and its runtime dependencies into one image. |
+| Azure Container Registry | Stores versioned backend Docker images. |
+| Azure Container Apps | Runs the backend image and creates a new revision for each deployment. |
+| GitHub Actions | Builds the frontend, tests the backend, builds the Docker image, pushes it to the registry, and updates the Container App. |
+| GitHub Secrets and Variables | Supplies deployment and runtime configuration without placing credentials in the repository. |
+
+## Project structure
 
 ```text
 Backend/
-  data/
-    source_documents/        Local PDFs (Git-ignored)
-    documents/               Extracted document artifacts (Git-ignored)
+  database_setup/              PostgreSQL setup script
   rag_app/
-    api.py                    FastAPI application assembly
-    cli.py                    Local commands
-    core/                     Configuration, shared schemas, exceptions
-    document_extraction/      Docling extraction and structure-aware chunking
-    document_storage/         Azure Blob and local document storage
-    database/                 PostgreSQL models, sessions, and keyword search
-    agents/                   LangGraph query, retrieval, reranking, answer agents
-    embedding_generation/     Azure OpenAI embeddings and chat completions
-    vector_store_operations/  Pinecone index and vector operations
-    retrieval/                Semantic/keyword reciprocal-rank fusion
-    rag_pipeline/             Ingestion/query orchestration and use cases
-    routing/                  Thin FastAPI endpoint adapters only
-  tests/
+    agents/                    LangGraph workflow and agents
+    core/                      Settings, schemas, and exceptions
+    database/                  PostgreSQL models and repositories
+    document_extraction/       PDF extraction and chunking
+    document_storage/          Azure Blob and local storage
+    embedding_generation/      Azure OpenAI client
+    rag_pipeline/              Ingestion and query orchestration
+    retrieval/                 Hybrid search and result fusion
+    routing/                   FastAPI routes only
+    vector_store_operations/   Pinecone operations
+  tests/                       Backend tests
+Frontend/                      React and Vite frontend
+.github/workflows/             CI and Azure deployment workflows
+Dockerfile                     Production backend container
+docker-compose.yml             Local PostgreSQL container
+pyproject.toml                 Python dependencies
+uv.lock                        Locked Python dependency versions
 ```
 
-`pyproject.toml` is the single dependency manifest. The duplicate backend
-`requirements.txt` and the old compatibility wrapper packages were removed.
+## Configuration
 
-## Configure
+### Local backend configuration
 
-Copy `Backend/.env.example` to `Backend/.env` for local development. In GitHub,
-map protected environment secrets and variables to the same uppercase names.
-Deployment variables must be Azure deployment names, which may differ from the
-underlying model names. The Pinecone index dimension must equal
-`EMBEDDING_DIMENSIONS`. The configured chat deployment must support Azure
-OpenAI structured outputs; `AZURE_OPENAI_API_VERSION=2024-10-21` is the
-default.
+Create a local environment file from the example:
 
-Required secrets:
+```powershell
+Copy-Item Backend/.env.example Backend/.env
+```
 
-- `AZURE_OPENAI_API_KEY`
-- `PINECONE_API_KEY`
-- `POSTGRES_PASSWORD`
-- One Blob credential only when managed identity is unavailable:
-  `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_STORAGE_ACCOUNT_KEY`, or
-  `AZURE_STORAGE_SAS_TOKEN`
+Open `Backend/.env` and replace the example values. Do not commit this file.
 
-Important variables include `AZURE_OPENAI_ENDPOINT`, `PINECONE_HOST`,
-`POSTGRES_HOST`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
-`AZURE_STORAGE_ACCOUNT_URL`, `AZURE_STORAGE_CONTAINER`,
-`PINECONE_HISTORY_NAMESPACE`, and the history/reranking limits. See
-`Backend/.env.example` for the complete list.
+The main settings are:
 
-GitHub secrets are available only to workflows. The application reads runtime
-configuration from environment variables, so a manually created Container App
-must receive the same sensitive values as Azure Container Apps secrets (or
-Key Vault references). Do not put any API key, database password, storage
-credential, or service-principal credential in `Frontend/.env`; Vite variables
-are delivered to the browser.
+| Setting | Description |
+|---|---|
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint. |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key. |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Name of the deployed embedding model. |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Name of the deployed chat model. |
+| `EMBEDDING_DIMENSIONS` | Must match the dimension used by the Pinecone index. |
+| `PINECONE_API_KEY` | Pinecone API key. |
+| `PINECONE_HOST` | Host of the existing Pinecone index. |
+| `PINECONE_NAMESPACE` | Default namespace for document vectors. |
+| `POSTGRES_HOST` | PostgreSQL server hostname. |
+| `POSTGRES_DATABASE` | Application database name. |
+| `POSTGRES_USER` | Application database user. |
+| `POSTGRES_PASSWORD` | Application database password. |
+| `AZURE_STORAGE_ACCOUNT_URL` | Azure Blob Storage account URL. |
+| `AZURE_STORAGE_CONTAINER` | Blob container used for PDFs. |
+| `CORS_ALLOWED_ORIGINS` | Frontend addresses allowed to call the API. |
 
-The Azure API key that was previously stored in `embedding.ipynb` must be
-revoked and regenerated before this application is used.
+See `Backend/.env.example` for every available setting and its default value.
 
-## Run
+### GitHub secrets
+
+Add these under **GitHub repository > Settings > Secrets and variables > Actions > Secrets**:
+
+| Secret | Purpose |
+|---|---|
+| `AZURE_OPENAI_API_KEY` | Authenticates with Azure OpenAI. |
+| `PINECONE_API_KEY` | Authenticates with Pinecone. |
+| `POSTGRES_PASSWORD` | Password for the PostgreSQL application user. |
+| `AZURE_STORAGE_CONNECTION_STRING` | Optional Blob credential. Use only one of the supported Blob credential secrets. |
+| `AZURE_STORAGE_ACCOUNT_KEY` | Optional alternative Blob credential. |
+| `AZURE_STORAGE_SAS_TOKEN` | Optional alternative Blob credential. |
+
+Create the following secret in the GitHub environment named exactly **Production**:
+
+| Environment secret | Purpose |
+|---|---|
+| `AZURE_CREDENTIALS` | Service-principal JSON used by GitHub Actions to sign in to Azure. |
+
+If Blob Storage uses the Container App managed identity, no Blob credential secret is required. Give that identity the **Storage Blob Data Contributor** role on the storage account.
+
+### GitHub variables
+
+Add non-sensitive configuration under **GitHub repository > Settings > Secrets and variables > Actions > Variables**.
+
+Required deployment variables:
+
+| Variable | Description |
+|---|---|
+| `AZURE_CONTAINER_REGISTRY_NAME` | Registry name only, for example `backendrag`. |
+| `AZURE_RESOURCE_GROUP` | Resource group containing the Container App. |
+| `AZURE_CONTAINER_APP_NAME` | Existing Container App name. |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint. |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Embedding deployment name. |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Chat deployment name. |
+| `PINECONE_HOST` | Pinecone index host. |
+| `PINECONE_REGION` | Pinecone index region. |
+| `POSTGRES_HOST` | PostgreSQL hostname. |
+| `POSTGRES_DATABASE` | PostgreSQL database name. |
+| `POSTGRES_USER` | PostgreSQL application user. |
+| `AZURE_STORAGE_ACCOUNT_URL` | Blob Storage account URL. |
+| `AZURE_STORAGE_CONTAINER` | Blob container name. |
+| `CORS_ALLOWED_ORIGINS` | Allowed frontend origins, separated by commas. |
+
+Common optional variables:
+
+| Variable | Default |
+|---|---|
+| `CONTAINER_IMAGE_NAME` | `enterprise-rag-api` |
+| `AZURE_OPENAI_API_VERSION` | `2024-10-21` |
+| `EMBEDDING_DIMENSIONS` | `1536` |
+| `PINECONE_INDEX_NAME` | `enterprise-rag` |
+| `PINECONE_NAMESPACE` | `default` |
+| `PINECONE_HISTORY_NAMESPACE` | `conversation-history` |
+| `PINECONE_CLOUD` | `aws` |
+| `PINECONE_METRIC` | `cosine` |
+| `POSTGRES_PORT` | `5432` |
+| `POSTGRES_SSLMODE` | `require` |
+| `OBJECT_STORAGE_PROVIDER` | `azure_blob` |
+| `AZURE_STORAGE_PREFIX` | `documents` |
+
+Chunking, retrieval, reranking, history, and database pool settings are also optional. Their names and defaults are listed in `Backend/.env.example`.
+
+Never store API keys, passwords, service-principal credentials, connection strings, account keys, or SAS tokens as GitHub variables.
+
+## Run locally
+
+### Requirements
+
+- Python 3.12
+- [uv](https://docs.astral.sh/uv/)
+- Node.js and npm
+- Docker Desktop, if PostgreSQL will run locally
+
+### 1. Start PostgreSQL
+
+```powershell
+docker compose up -d postgres
+```
+
+For the local Docker database, use these values in `Backend/.env`:
+
+```env
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DATABASE=rag_db
+POSTGRES_USER=rag_app
+POSTGRES_PASSWORD=local-rag-password
+POSTGRES_SSLMODE=disable
+```
+
+### 2. Start the backend
 
 From the repository root:
 
 ```powershell
 uv sync
 uv run python -m Backend.rag_app.cli init-db
-uv run python -m Backend.rag_app.cli init-index
-uv run python -m Backend.rag_app.cli ingest "Backend/data/source_documents/10-Q4-2024-As-Filed.pdf"
-uv run python -m Backend.rag_app.cli query "What is this document about?"
-uv run python -m Backend.rag_app.cli keyword-search "revenue growth"
 uv run uvicorn Backend.rag_app.api:app --reload
 ```
 
-For a local PostgreSQL instance:
+The backend is available at:
 
-```powershell
-docker compose up -d postgres
-$env:POSTGRES_HOST="localhost"
-$env:POSTGRES_PORT="5432"
-$env:POSTGRES_DATABASE="rag_db"
-$env:POSTGRES_USER="rag_app"
-$env:POSTGRES_PASSWORD="local-rag-password"
-$env:POSTGRES_SSLMODE="disable"
-uv run python -m Backend.rag_app.cli init-db
+- API: `http://localhost:8000`
+- Health check: `http://localhost:8000/health`
+- Swagger UI: `http://localhost:8000/docs`
+
+### 3. Start the frontend
+
+Create `Frontend/.env`:
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
 ```
 
-API endpoints:
-
-- `GET /health`
-- `POST /v1/documents` with a PDF multipart upload and optional `namespace`
-- `POST /v1/sessions` with `name` and `namespace`
-- `GET /v1/sessions/{session_id}` with optional `limit`
-- `POST /v1/query` with `session_id`, `query`, optional `top_k`,
-  `metadata_filter`, `score_threshold`, and `search_mode` (`hybrid`, `semantic`,
-  or `keyword`). The server uses the namespace assigned to the session.
-- `POST /v1/search/keyword` with `query`, optional `top_k`, `namespace`, and
-  `document_id`
-
-## Frontend
-
-The React frontend provides document upload, backend-managed sessions, queries,
-and persisted session history. Copy `Frontend/.env.example` to `Frontend/.env`
-and set `VITE_API_BASE_URL` to the backend URL. This URL is public
-configuration and belongs in a GitHub variable if the frontend is built in CI;
-it is not a secret.
+Then run:
 
 ```powershell
 cd Frontend
@@ -129,178 +240,65 @@ npm install
 npm run dev
 ```
 
-For a deployed frontend, set `CORS_ALLOWED_ORIGINS` on the backend Container
-App to the frontend origin. Multiple origins can be comma-separated.
+Open `http://localhost:5173`.
 
-Generated extraction artifacts are stored under `Backend/data/documents/` and
-are intentionally ignored by Git.
+## Main API endpoints
 
-The CI workflow uses an isolated PostgreSQL service container and does not
-receive production cloud secrets.
-
-## Build, push, and deploy the backend
-
-The production GitHub workflow builds the backend Docker image, pushes both an
-immutable commit tag and `latest` to Azure Container Registry, synchronizes
-runtime secrets and variables to the existing Container App, and changes the
-Container App image to the immutable tag. Azure Container Apps creates a new
-revision for the deployment.
-
-The relevant files are:
-
-- `Dockerfile`: a non-root Python 3.12 production image.
-- `Backend/rag_app/container.py`: initializes PostgreSQL and starts Uvicorn on
-  port 8000.
-- `.github/workflows/deploy-container-app.yml`: builds, pushes, configures, and
-  deploys the backend.
-
-### 1. Configure GitHub authentication
-
-The workflow uses an Azure service principal stored in the protected GitHub
-environment named exactly `Production`.
-
-Create this **environment secret**:
-
-```text
-Name: AZURE_CREDENTIALS
-Value:
-{
-  "clientId": "<service-principal-application-client-id>",
-  "clientSecret": "<service-principal-client-secret-value>",
-  "subscriptionId": "<azure-subscription-id>",
-  "tenantId": "<microsoft-entra-tenant-id>"
-}
-```
-
-Use the service principal client secret **value**, not the Azure secret ID.
-Assign the service principal:
-
-- **AcrPush** on the `backendrag` registry;
-- **Container Apps Contributor** on the existing Container App or its resource
-  group; and
-- **Reader** on resources the workflow must resolve.
-
-Add these repository variables:
-
-| GitHub variable | Example / purpose |
+| Method and endpoint | Purpose |
 |---|---|
-| `AZURE_CONTAINER_REGISTRY_NAME` | `backendrag` (not `backendrag.azurecr.io`) |
-| `AZURE_RESOURCE_GROUP` | Resource group containing the Container App |
-| `AZURE_CONTAINER_APP_NAME` | Existing backend Container App name |
-| `CONTAINER_IMAGE_NAME` | Optional; defaults to `enterprise-rag-api` |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint |
-| `AZURE_OPENAI_API_VERSION` | Optional; defaults to `2024-10-21` |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Embedding deployment name |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Chat deployment name |
-| `EMBEDDING_DIMENSIONS` | Optional; defaults to `1536` |
-| `PINECONE_HOST` | Existing Pinecone index host |
-| `PINECONE_INDEX_NAME` | Optional; defaults to `enterprise-rag` |
-| `PINECONE_NAMESPACE` | Optional; defaults to `default` |
-| `PINECONE_HISTORY_NAMESPACE` | Optional; defaults to `conversation-history` |
-| `PINECONE_CLOUD` | Optional; defaults to `aws` |
-| `PINECONE_REGION` | Pinecone index region |
-| `POSTGRES_HOST` | Azure PostgreSQL server host |
-| `POSTGRES_PORT` | Optional; defaults to `5432` |
-| `POSTGRES_DATABASE` | Database name |
-| `POSTGRES_USER` | Database user |
-| `POSTGRES_SSLMODE` | Optional; defaults to `require` |
-| `OBJECT_STORAGE_PROVIDER` | Optional; defaults to `azure_blob` |
-| `AZURE_STORAGE_ACCOUNT_URL` | Blob account URL |
-| `AZURE_STORAGE_CONTAINER` | Blob container name |
-| `AZURE_STORAGE_PREFIX` | Optional; defaults to `documents` |
-| `CORS_ALLOWED_ORIGINS` | Frontend origins, comma-separated |
+| `GET /health` | Checks whether the backend is running. |
+| `POST /v1/documents?namespace=default` | Uploads and processes a PDF. |
+| `POST /v1/sessions` | Creates a chat session with a name and namespace. |
+| `GET /v1/sessions/{session_id}` | Returns the saved session history. |
+| `POST /v1/query` | Answers a question using the session namespace and history. |
+| `POST /v1/search/keyword` | Performs PostgreSQL keyword search directly. |
 
-The chunking, retrieval, reranking, connection-pool, and history variables in
-`Backend/.env.example` are optional repository variables. The workflow supplies
-the documented defaults when they are absent.
+## Build and deploy with GitHub Actions
 
-Create these repository secrets:
+Two workflows are used:
 
-- `AZURE_OPENAI_API_KEY`
-- `PINECONE_API_KEY`
-- `POSTGRES_PASSWORD`
-- one optional Blob credential: `AZURE_STORAGE_CONNECTION_STRING`,
-  `AZURE_STORAGE_ACCOUNT_KEY`, or `AZURE_STORAGE_SAS_TOKEN`
+1. **Backend CI** builds the frontend and runs the backend tests.
+2. **Build, Push, and Deploy Backend** creates the Docker image, pushes it to Azure Container Registry, synchronizes the Container App settings, and deploys a new Container App revision.
 
-If no Blob credential is supplied, the backend uses the Container App managed
-identity. That identity must have a Blob data role such as **Storage Blob Data
-Contributor** on the storage account.
+Recommended deployment flow:
 
-Secrets are written to the Container App secret store and exposed to the
-container through `secretref:` environment references. They are not embedded
-in the Docker image.
+1. Push a feature branch.
+2. Open a pull request into `main`.
+3. Wait for **Backend CI** to pass.
+4. Merge the pull request.
+5. CI runs for `main`.
+6. After CI succeeds, the deployment workflow runs automatically.
 
-### 2. Build and push
+The deployment workflow can also be started manually from:
 
-The recommended production flow is:
+**GitHub > Actions > Build, Push, and Deploy Backend > Run workflow**
 
-1. Push your branch and open a pull request into `main`.
-2. The **Backend CI** workflow tests the pull request. Pull requests do not
-   push an image.
-3. Merge the pull request into `main`.
-4. **Backend CI** runs again for the merge commit.
-5. When CI succeeds, **Build, Push, and Deploy Backend** builds that exact
-   commit, pushes it to `backendrag.azurecr.io`, updates runtime configuration,
-   and deploys a new Container App revision. A failed CI run does not deploy.
+Manual deployment must use the `main` branch.
 
-You can also use **Actions > Build, Push, and Deploy Backend > Run workflow**
-and select `main`. Workflow dispatch builds and deploys the selected commit; it
-is useful for the first deployment or a retry.
-
-The workflow pushes two tags:
+The workflow pushes two image tags:
 
 ```text
 backendrag.azurecr.io/enterprise-rag-api:<git-commit-sha>
 backendrag.azurecr.io/enterprise-rag-api:latest
 ```
 
-Prefer the commit SHA tag when manually creating a production revision because
-it is immutable and makes rollback unambiguous.
+The commit SHA tag is recommended for production because it points to one exact version of the code.
 
-### 3. One-time Container App prerequisites
+## Azure requirements
 
-The existing Container App must have:
+Before deploying, make sure:
 
-- ingress target port `8000`;
-- external ingress if the browser frontend will call it directly;
-- a managed identity with **AcrPull** on `backendrag`, or an existing valid ACR
-  registry configuration;
-- PostgreSQL firewall/private-network access;
-- Blob access through either the synchronized credential or managed identity.
+- The Container App ingress target port is `8000`.
+- External ingress is enabled if the browser calls the API directly.
+- The Container App can pull images from Azure Container Registry.
+- PostgreSQL allows network access from the Container Apps environment.
+- The Pinecone index dimension matches `EMBEDDING_DIMENSIONS`.
+- Blob Storage credentials or managed-identity permissions are configured.
+- `CORS_ALLOWED_ORIGINS` contains the frontend URL.
 
-The workflow sets `AUTO_INIT_DB=true`, so a deployment creates any missing
-PostgreSQL tables before Uvicorn starts.
+The workflow sets `AUTO_INIT_DB=true`, so the backend creates missing application tables when a new revision starts. The database and application user must already exist and have permission to create tables in the application schema. The setup script is available at `Backend/database_setup/create_rag_database.sql`.
 
-PostgreSQL must allow network traffic from the Container Apps environment. For
-production, prefer private connectivity or a VNet with NAT Gateway rather than
-allowing every Azure service.
-
-### Start the frontend against the cloud backend
-
-The frontend is intentionally separate from the backend container. To run it
-locally against the deployed Container App:
-
-```powershell
-cd Frontend
-$env:VITE_API_BASE_URL="https://<your-container-app-fqdn>"
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173`. Set the backend repository variable
-`CORS_ALLOWED_ORIGINS` to include `http://localhost:5173`; for example:
-
-```text
-http://localhost:5173,https://your-future-frontend.example.com
-```
-
-After changing `CORS_ALLOWED_ORIGINS`, run the deployment workflow again. The
-frontend will then create sessions through `/v1/sessions`, send questions to
-`/v1/query`, and load persisted history from `/v1/sessions/{session_id}`.
-
-### Local Docker smoke test
-
-After creating `Backend/.env`, run:
+## Run the backend with Docker
 
 ```powershell
 docker build -t enterprise-rag-api:local .
@@ -308,7 +306,11 @@ docker run --rm -p 8000:8000 --env-file Backend/.env `
   -e AUTO_INIT_DB=true enterprise-rag-api:local
 ```
 
-Then open `http://localhost:8000/docs`.
+Open `http://localhost:8000/docs` to test the API.
 
-The current external endpoint has no application authentication. Do not upload
-sensitive documents until authentication and authorization are added.
+## Security notes
+
+- Never commit `.env` files or credentials.
+- Frontend variables are visible in the browser and must never contain secrets.
+- Restrict PostgreSQL and storage network access for production.
+- The current API does not include user authentication. Do not upload confidential documents until authentication and authorization are added.
