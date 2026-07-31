@@ -5,3 +5,4 @@ Backend/.env
 Backend/data/
 __pycache__/
 .pytest_cache/
+.uv-cache/

@@ -1,11 +1,15 @@
 """Azure OpenAI embedding and chat client wrappers."""
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, TypeVar
 
 from openai import AzureOpenAI
+from pydantic import BaseModel
 
 from ..core.config import Settings
+
+
+StructuredResponse = TypeVar("StructuredResponse", bound=BaseModel)
 
 
 class AzureOpenAIService:
@@ -47,3 +51,21 @@ class AzureOpenAIService:
             temperature=temperature,
         )
         return response.choices[0].message.content or ""
+
+    def complete_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_model: type[StructuredResponse],
+        *,
+        temperature: float = 0.0,
+    ) -> StructuredResponse:
+        response: Any = self.client.beta.chat.completions.parse(
+            model=self.settings.azure_openai_chat_deployment,
+            messages=messages,
+            response_format=response_model,
+            temperature=temperature,
+        )
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            raise RuntimeError("Azure OpenAI did not return the requested structured response")
+        return parsed

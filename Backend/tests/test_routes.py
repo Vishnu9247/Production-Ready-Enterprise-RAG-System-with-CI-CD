@@ -4,7 +4,15 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from Backend.rag_app.api import app
-from Backend.rag_app.core.schemas import Answer, IngestResponse, SearchResult
+from datetime import datetime, timezone
+
+from Backend.rag_app.core.schemas import (
+    Answer,
+    IngestResponse,
+    SearchResult,
+    SessionHistoryResponse,
+    SessionResponse,
+)
 from Backend.rag_app.rag_pipeline.factory import get_rag_service
 
 
@@ -19,9 +27,32 @@ class FakeRAGService:
             namespace=namespace or "default",
         )
 
-    def answer(self, question, **kwargs):
-        self.question = question
-        return Answer(answer="Test answer", citations=[], sources=[])
+    def answer(self, session_id, query, **kwargs):
+        self.question = query
+        return Answer(
+            session_id=session_id,
+            query=query,
+            resolved_query=query,
+            answer="Test answer",
+            reason="Test reason",
+            references=[],
+        )
+
+    def create_session(self, name, namespace):
+        now = datetime.now(timezone.utc)
+        return SessionResponse(
+            session_id="session-1",
+            name=name,
+            namespace=namespace,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def get_session_history(self, session_id, *, limit=None):
+        return SessionHistoryResponse(
+            session=self.create_session("Test session", "default"),
+            messages=[],
+        )
 
     def keyword_search(self, query_text, **kwargs):
         return [
@@ -46,7 +77,14 @@ class RouteTests(unittest.TestCase):
     def test_expected_routes_are_registered(self) -> None:
         paths = set(app.openapi()["paths"])
         self.assertTrue(
-            {"/health", "/v1/documents", "/v1/query", "/v1/search/keyword"}.issubset(
+            {
+                "/health",
+                "/v1/documents",
+                "/v1/query",
+                "/v1/search/keyword",
+                "/v1/sessions",
+                "/v1/sessions/{session_id}",
+            }.issubset(
                 paths
             )
         )
@@ -55,6 +93,20 @@ class RouteTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+    def test_cors_allows_configured_frontend(self) -> None:
+        response = self.client.options(
+            "/v1/query",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "http://localhost:5173",
+        )
 
     def test_pdf_upload(self) -> None:
         response = self.client.post(
@@ -74,9 +126,28 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "Only PDF uploads are supported")
 
     def test_query(self) -> None:
-        response = self.client.post("/v1/query", json={"question": "What changed?"})
+        response = self.client.post(
+            "/v1/query",
+            json={
+                "session_id": "session-1",
+                "query": "What changed?",
+                "search_mode": "hybrid",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["answer"], "Test answer")
+
+    def test_session_creation_and_history(self) -> None:
+        created = self.client.post(
+            "/v1/sessions",
+            json={"name": "Test session", "namespace": "default"},
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["session_id"], "session-1")
+
+        history = self.client.get("/v1/sessions/session-1")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["messages"], [])
 
     def test_keyword_search(self) -> None:
         response = self.client.post(

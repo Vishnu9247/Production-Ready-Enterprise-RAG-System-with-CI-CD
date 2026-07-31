@@ -1,10 +1,19 @@
-"""End-to-end ingestion and grounded question answering."""
+"""End-to-end ingestion and LangGraph-powered grounded question answering."""
 
 from pathlib import Path
 from typing import Any
 
 from ..core.config import Settings
-from ..core.schemas import Answer, Citation, IngestResponse, SearchResult
+from ..agents import QueryWorkflow
+from ..agents.state import QueryWorkflowState
+from ..core.schemas import (
+    Answer,
+    IngestResponse,
+    SearchResult,
+    SessionHistoryResponse,
+    SessionResponse,
+)
+from ..database.conversation_repository import ConversationRepository
 from ..document_extraction.chunking import chunk_document
 from ..document_extraction.extractor import extract_document
 from ..document_storage.base import DocumentStorage
@@ -13,12 +22,6 @@ from ..database.repository import PostgresDocumentRepository
 from ..embedding_generation.service import AzureOpenAIService
 from ..retrieval.hybrid import HybridRetriever, SearchMode
 from ..vector_store_operations.pinecone_store import PineconeVectorStore
-
-
-SYSTEM_PROMPT = """You answer questions using only the supplied context.
-If the context does not contain enough information, say that you do not know.
-Use inline citations such as [1] and [2] that correspond to the numbered context blocks.
-Do not invent citations, facts, or sources."""
 
 
 class RAGService:
@@ -30,6 +33,8 @@ class RAGService:
         document_repository: PostgresDocumentRepository | None = None,
         document_storage: DocumentStorage | None = None,
         retriever: HybridRetriever | None = None,
+        conversations: ConversationRepository | None = None,
+        query_workflow: QueryWorkflow | None = None,
     ) -> None:
         self.settings = settings
         self.azure = azure or AzureOpenAIService(settings)
@@ -41,6 +46,22 @@ class RAGService:
         self.retriever = retriever or HybridRetriever(
             settings, self.vector_store, self.document_repository
         )
+        self.conversations = conversations
+        if self.conversations is None and settings.database_configured:
+            session_factory = (
+                self.document_repository.session_factory
+                if self.document_repository is not None
+                else None
+            )
+            self.conversations = ConversationRepository(settings, session_factory)
+        self.query_workflow = query_workflow
+        if self.query_workflow is None and self.conversations is not None:
+            self.query_workflow = QueryWorkflow(
+                settings,
+                self.azure,
+                self.conversations,
+                self.retriever,
+            )
 
     def ingest_pdf(
         self,
@@ -89,40 +110,62 @@ class RAGService:
 
     def answer(
         self,
-        question: str,
+        session_id: str,
+        query: str,
         *,
         top_k: int | None = None,
-        namespace: str | None = None,
         metadata_filter: dict[str, Any] | None = None,
         score_threshold: float | None = None,
         search_mode: SearchMode = "hybrid",
     ) -> Answer:
-        sources = self.retriever.search(
-            question,
-            mode=search_mode,
-            top_k=top_k,
-            namespace=namespace,
-            metadata_filter=metadata_filter,
-            score_threshold=score_threshold,
+        if self.conversations is None or self.query_workflow is None:
+            raise RuntimeError("PostgreSQL is required for session-based querying")
+        session = self.conversations.get_session(session_id)
+        state: QueryWorkflowState = {
+            "session_id": session_id,
+            "namespace": session.namespace,
+            "query": query,
+            "search_mode": search_mode,
+            "top_k": top_k,
+            "metadata_filter": metadata_filter,
+            "score_threshold": score_threshold,
+        }
+        result = self.query_workflow.invoke(state)
+        answer = Answer(
+            session_id=session_id,
+            query=query,
+            resolved_query=result["resolved_query"],
+            answer=result["answer"],
+            reason=result["reason"],
+            references=result.get("references", []),
         )
-        if not sources:
-            return Answer(
-                answer="I do not know based on the indexed documents.", citations=[], sources=[]
-            )
-        context = "\n\n".join(
-            f"[{number}] {source.text}" for number, source in enumerate(sources, start=1)
+        messages = self.conversations.append_exchange(
+            session_id=session_id,
+            query=query,
+            resolved_query=answer.resolved_query,
+            answer=answer.answer,
+            reason=answer.reason,
+            references=answer.references,
         )
-        response = self.azure.complete(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
-            ]
+        self.vector_store.upsert_history_messages(messages)
+        return answer
+
+    def create_session(self, name: str, namespace: str) -> SessionResponse:
+        if self.conversations is None:
+            raise RuntimeError("PostgreSQL is required for conversation sessions")
+        return self.conversations.create_session(name, namespace)
+
+    def get_session_history(
+        self, session_id: str, *, limit: int | None = None
+    ) -> SessionHistoryResponse:
+        if self.conversations is None:
+            raise RuntimeError("PostgreSQL is required for conversation sessions")
+        session = self.conversations.get_session(session_id)
+        messages = self.conversations.list_messages(
+            session_id,
+            limit=limit or self.settings.history_max_messages,
         )
-        return Answer(
-            answer=response,
-            citations=[self._citation(number, source) for number, source in enumerate(sources, 1)],
-            sources=sources,
-        )
+        return SessionHistoryResponse(session=session, messages=messages)
 
     def keyword_search(
         self,
@@ -139,22 +182,4 @@ class RAGService:
             top_k=top_k,
             namespace=namespace,
             metadata_filter=metadata_filter,
-        )
-
-    @staticmethod
-    def _citation(number: int, source: SearchResult) -> Citation:
-        raw_pages = source.metadata.get("page_numbers", [])
-        pages = []
-        for page in raw_pages if isinstance(raw_pages, list) else [raw_pages]:
-            try:
-                pages.append(int(float(page)))
-            except (TypeError, ValueError):
-                continue
-        return Citation(
-            number=number,
-            chunk_id=source.chunk_id,
-            document_id=str(source.metadata.get("document_id", "")),
-            document_name=str(source.metadata.get("document_name", "")),
-            page_numbers=pages,
-            score=source.score,
         )
