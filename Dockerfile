@@ -18,6 +18,9 @@ COPY Backend ./Backend
 FROM python:3.12-slim-bookworm AS runtime
 
 ENV PATH="/app/.venv/bin:$PATH" \
+    HOME=/app \
+    HF_HOME=/app/.cache/huggingface \
+    XDG_CACHE_HOME=/app/.cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
@@ -33,8 +36,11 @@ RUN groupadd --system --gid 10001 rag \
 COPY --from=builder --chown=rag:rag /app/.venv /app/.venv
 COPY --from=builder --chown=rag:rag /app/Backend /app/Backend
 
-RUN mkdir -p /app/Backend/data/documents /app/Backend/data/source_documents \
-    && chown -R rag:rag /app/Backend/data
+RUN mkdir -p \
+        /app/.cache/huggingface \
+        /app/Backend/data/documents \
+        /app/Backend/data/source_documents \
+    && chown -R rag:rag /app/.cache /app/Backend/data
 
 USER rag
 
