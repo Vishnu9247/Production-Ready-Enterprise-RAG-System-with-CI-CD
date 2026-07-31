@@ -103,45 +103,25 @@ Generated extraction artifacts are stored under `Backend/data/documents/` and
 are intentionally ignored by Git.
 
 The CI workflow uses an isolated PostgreSQL service container and does not
-receive production cloud secrets. A deployment workflow should declare a
-protected GitHub environment and explicitly map its `secrets` and `vars` into
-the application runtime.
+receive production cloud secrets.
 
-## Deploy to Azure Container Apps
+## Build and push the container image
 
-The repository includes:
+The GitHub workflow only builds the Docker image and pushes it to Azure
+Container Registry. It does not create, update, or restart a Container App, and
+it does not copy application runtime secrets into Azure.
+
+The relevant files are:
 
 - `Dockerfile`: a non-root Python 3.12 production image.
-- `Backend/rag_app/container.py`: initializes the PostgreSQL schema and starts
-  Uvicorn on port 8000.
-- `Infrastructure/azure/bootstrap-container-app.ps1`: creates the resource
-  group, Azure Container Registry, Container Apps environment, and initial
-  Container App. The app uses its managed identity to pull from ACR.
-- `.github/workflows/deploy-container-app.yml`: builds and pushes an immutable
-  image tagged with the Git commit, deploys it, maps GitHub secrets into
-  Container Apps secrets, and verifies `/health`.
+- `Backend/rag_app/container.py`: initializes PostgreSQL and starts Uvicorn on
+  port 8000.
+- `.github/workflows/build-push-acr.yml`: builds and pushes the image to
+  `backendrag.azurecr.io`.
 
-### 1. Create the Azure infrastructure once
+### 1. Configure GitHub authentication
 
-Install Azure CLI and Docker Desktop, then run from PowerShell:
-
-```powershell
-az login
-.\Infrastructure\azure\bootstrap-container-app.ps1 `
-  -SubscriptionId "<subscription-id>" `
-  -ResourceGroup "rg-enterprise-rag-prod" `
-  -Location "eastus" `
-  -RegistryName "backendrag" `
-  -ContainerAppsEnvironment "cae-enterprise-rag-prod" `
-  -ContainerAppName "ca-enterprise-rag-api"
-```
-
-Azure Container Registry names must be globally unique and contain only
-letters and numbers.
-
-### 2. Configure GitHub-to-Azure authentication
-
-The deployment uses an Azure service principal stored in the protected GitHub
+The workflow uses an Azure service principal stored in the protected GitHub
 environment named exactly `Production`.
 
 Create this **environment secret**:
@@ -158,84 +138,64 @@ Value:
 ```
 
 Use the service principal client secret **value**, not the Azure secret ID.
-Assign the service principal **Contributor** on the Container App resource
-group and **AcrPush** on the `backendrag` registry. The Container App uses its
-own managed identity with **AcrPull**.
+Assign the service principal **AcrPush** and **Reader** on the `backendrag`
+registry. It does not need permission to modify Container Apps.
 
-All application settings can remain in repository-level GitHub variables and
-secrets. Environment-level values with the same name take precedence.
-
-Add these deployment variables at repository level:
+Add this repository variable:
 
 | GitHub variable | Example |
 |---|---|
-| `AZURE_RESOURCE_GROUP` | `rg-enterprise-rag-prod` |
 | `AZURE_CONTAINER_REGISTRY_NAME` | `backendrag` (not `backendrag.azurecr.io`) |
-| `AZURE_CONTAINER_APP_ENVIRONMENT` | `cae-enterprise-rag-prod` |
-| `AZURE_CONTAINER_APP_NAME` | `ca-enterprise-rag-api` |
-| `AZURE_CONTAINER_APP_MIN_REPLICAS` | `1` |
-| `AZURE_CONTAINER_APP_MAX_REPLICAS` | `3` |
-| `AZURE_CONTAINER_APP_CPU` | `1.0` |
-| `AZURE_CONTAINER_APP_MEMORY` | `2.0Gi` |
 
-Keep all application variables and secrets listed in the **Configure** section
-at repository level. Store `AZURE_CREDENTIALS` in the `Production` environment
-because it authorizes production deployment.
+`AZURE_RESOURCE_GROUP` and all `AZURE_CONTAINER_APP_*` variables are not used
+by this workflow. Existing repository application secrets may remain in
+GitHub, but they are not embedded in the image or sent to Container Apps.
 
-### 3. Configure PostgreSQL networking
-
-The starter Container Apps environment uses Azure-managed public networking.
-Its outbound IP addresses can change. A PostgreSQL Flexible Server that only
-allows your laptop's IP will therefore reject the container.
-
-For a temporary first launch, the PostgreSQL Networking page can enable
-**Allow public access from any Azure service within Azure**. This is broad
-access at the network layer, so keep strong database credentials and remove
-the rule after testing.
-
-For production, create the Container Apps environment in your own VNet and use
-either:
-
-- private connectivity to PostgreSQL, or
-- a NAT Gateway with one static outbound IP and allow only that IP in the
-  PostgreSQL firewall.
-
-An environment's network type cannot be changed after creation, so choose the
-VNet design before putting real data into production.
-
-### 4. Deploy
+### 2. Build and push
 
 The recommended production flow is:
 
 1. Push your branch and open a pull request into `main`.
 2. The **Backend CI** workflow tests the pull request. Pull requests do not
-   deploy.
+   push an image.
 3. Merge the pull request into `main`.
 4. **Backend CI** runs again for the merge commit.
-5. When CI succeeds, **Deploy Backend to Azure Container Apps** automatically
-   builds that exact commit, pushes it to `backendrag.azurecr.io`, and deploys
-   it. A failed CI run does not deploy.
+5. When CI succeeds, **Build and Push Backend Image to ACR** builds that exact
+   commit and pushes it to `backendrag.azurecr.io`. A failed CI run does not
+   push an image.
 
-For the very first launch, after the deployment files are present on GitHub,
-you may instead open **Actions > Deploy Backend to Azure Container Apps > Run
-workflow** and select the `main` branch. Workflow dispatch is also useful for
-retrying a deployment without creating another commit.
+You can also use **Actions > Build and Push Backend Image to ACR > Run
+workflow** and select `main`. Workflow dispatch is useful for the first build
+or for retrying without another commit.
 
-Do not run a production workflow dispatch from a feature branch unless you
-intentionally want that branch deployed. The protected `Production`
-environment can be configured to require approval as an additional safeguard.
-
-When the workflow succeeds, its health-check step prints:
+The workflow pushes two tags:
 
 ```text
-Application URL: https://<app-fqdn>
-Swagger UI: https://<app-fqdn>/docs
+backendrag.azurecr.io/enterprise-rag-api:<git-commit-sha>
+backendrag.azurecr.io/enterprise-rag-api:latest
 ```
 
-The deployment starts with one replica because PDF extraction can be slow and
-the first request should not pay a cold-start penalty. Each image starts as a
-non-root user. The workflow stores API keys and passwords as Container Apps
-secrets and exposes them to the process only through secret references.
+Prefer the commit SHA tag when manually creating a production revision because
+it is immutable and makes rollback unambiguous.
+
+### 3. Create or update Container Apps manually
+
+In the Azure portal, select the image from the `backendrag` registry and
+configure:
+
+- container target port `8000`;
+- external or internal ingress as required;
+- `AUTO_INIT_DB=true`;
+- the application variables and secret references listed in
+  `Backend/.env.example`;
+- a managed identity with **AcrPull** on `backendrag`.
+
+Repository secrets are not automatically available to a manually configured
+Container App. Add them as Container Apps secrets in Azure.
+
+PostgreSQL must also allow network traffic from the Container Apps environment.
+For production, prefer private connectivity or a VNet with NAT Gateway rather
+than allowing every Azure service.
 
 ### Local Docker smoke test
 
