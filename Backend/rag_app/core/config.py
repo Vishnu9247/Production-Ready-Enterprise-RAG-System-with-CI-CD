@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=1536, gt=0)
     embedding_batch_size: int = Field(default=64, ge=1, le=2048)
 
+    llama_cloud_api_key: SecretStr = Field(default=SecretStr(""))
+    llama_cloud_organization_id: str = ""
+    llama_cloud_project_id: str = ""
+    llama_parse_tier: Literal[
+        "fast", "cost_effective", "agentic", "agentic_plus"
+    ] = "agentic"
+    llama_parse_version: str = "latest"
+    llama_parse_timeout_seconds: float = Field(default=600.0, ge=30.0, le=3600.0)
+
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
     pinecone_host: str = ""
     pinecone_index_name: str = "enterprise-rag"
@@ -89,6 +98,12 @@ class Settings(BaseSettings):
     def require_pinecone(self) -> None:
         if not self.pinecone_api_key.get_secret_value().strip():
             raise RuntimeError("Missing required Pinecone setting: PINECONE_API_KEY")
+
+    def require_llama_cloud(self) -> None:
+        if not self.llama_cloud_api_key.get_secret_value().strip():
+            raise RuntimeError(
+                "Missing required LlamaCloud setting: LLAMA_CLOUD_API_KEY"
+            )
 
     @property
     def database_configured(self) -> bool:

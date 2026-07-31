@@ -64,6 +64,8 @@ def chunk_document(
             text = block.get("text", "").strip()
         elif block_type == "table":
             text = block.get("table_markdown", "").strip()
+        elif block_type == "image":
+            text = block.get("caption", "").strip()
         else:
             continue
         if text:

@@ -19,8 +19,6 @@ FROM python:3.12-slim-bookworm AS runtime
 
 ENV PATH="/app/.venv/bin:$PATH" \
     HOME=/app \
-    HF_HOME=/app/.cache/huggingface \
-    XDG_CACHE_HOME=/app/.cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
@@ -30,13 +28,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes \
-        libgl1 \
-        libglib2.0-0 \
-        libxcb1 \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN groupadd --system --gid 10001 rag \
     && useradd --system --uid 10001 --gid rag --home-dir /app rag
 
@@ -44,10 +35,9 @@ COPY --from=builder --chown=rag:rag /app/.venv /app/.venv
 COPY --from=builder --chown=rag:rag /app/Backend /app/Backend
 
 RUN mkdir -p \
-        /app/.cache/huggingface \
         /app/Backend/data/documents \
         /app/Backend/data/source_documents \
-    && chown -R rag:rag /app/.cache /app/Backend/data
+    && chown -R rag:rag /app/Backend/data
 
 USER rag
 

@@ -1,14 +1,12 @@
-"""PDF extraction into normalized blocks and related assets using Docling."""
+"""PDF extraction into normalized blocks using LlamaCloud Parse."""
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling_core.types.doc import PictureItem, SectionHeaderItem, TableItem, TextItem
+from llama_cloud import LlamaCloud
 
 
 def create_document_id(file_path: str | Path) -> str:
@@ -20,146 +18,264 @@ def create_document_id(file_path: str | Path) -> str:
     return f"doc_{digest.hexdigest()[:12]}"
 
 
-def _page_number(item: Any) -> int | None:
-    return item.prov[0].page_no if getattr(item, "prov", None) else None
+def _model_dump(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return value
 
 
-def _bounding_box(item: Any) -> dict[str, float] | None:
-    if not getattr(item, "prov", None) or item.prov[0].bbox is None:
-        return None
-    box = item.prov[0].bbox
-    return {"left": box.l, "top": box.t, "right": box.r, "bottom": box.b}
+def _bounding_boxes(item: Any) -> list[dict[str, Any]]:
+    return [_model_dump(box) for box in (getattr(item, "bbox", None) or [])]
 
 
-def _label(item: Any) -> str | None:
-    label = getattr(item, "label", None)
-    return getattr(label, "value", str(label)) if label is not None else None
+def _page_content(result: Any, result_type: str, field: str) -> list[tuple[int, str]]:
+    content = getattr(result, result_type, None)
+    pages = getattr(content, "pages", None) or []
+    extracted: list[tuple[int, str]] = []
+    for page in pages:
+        if getattr(page, "success", True) is False:
+            continue
+        text = str(getattr(page, field, "") or "").strip()
+        if text:
+            extracted.append((int(getattr(page, "page_number", 0)), text))
+    return extracted
+
+
+def _fallback_blocks(
+    pages: list[tuple[int, str]], document_id: str
+) -> list[dict[str, Any]]:
+    """Create normalized blocks when structured items are not returned."""
+    blocks: list[dict[str, Any]] = []
+    sequence = 0
+    text_count = 0
+    table_count = 0
+    for page_number, page_markdown in pages:
+        for part in re.split(r"\n\s*\n", page_markdown):
+            content = part.strip()
+            if not content:
+                continue
+            sequence += 1
+            common = {
+                "block_id": f"{document_id}_block_{sequence:06d}",
+                "document_id": document_id,
+                "sequence": sequence,
+                "page_number": page_number,
+                "bounding_boxes": [],
+            }
+            heading = re.match(r"^(#{1,6})\s+(.+)$", content, flags=re.DOTALL)
+            if heading:
+                text_count += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "heading",
+                        "text_id": f"{document_id}_text_{text_count:06d}",
+                        "text": heading.group(2).strip(),
+                        "heading_level": len(heading.group(1)),
+                    }
+                )
+            elif "|" in content and "\n" in content:
+                table_count += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "table",
+                        "table_id": f"{document_id}_table_{table_count:06d}",
+                        "table_markdown": content,
+                    }
+                )
+            else:
+                text_count += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "text",
+                        "text_id": f"{document_id}_text_{text_count:06d}",
+                        "text": content,
+                    }
+                )
+    return blocks
+
+
+def _structured_blocks(result: Any, document_id: str) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    counters = {"text": 0, "image": 0, "table": 0}
+    pages = getattr(getattr(result, "items", None), "pages", None) or []
+
+    for page in pages:
+        if getattr(page, "success", True) is False:
+            continue
+        page_number = int(getattr(page, "page_number", 0))
+        for item in getattr(page, "items", None) or []:
+            item_type = str(getattr(item, "type", "") or "text").lower()
+            sequence = len(blocks) + 1
+            common = {
+                "block_id": f"{document_id}_block_{sequence:06d}",
+                "document_id": document_id,
+                "sequence": sequence,
+                "page_number": page_number,
+                "bounding_boxes": _bounding_boxes(item),
+                "label": item_type,
+            }
+
+            if item_type == "heading":
+                text = str(getattr(item, "value", "") or getattr(item, "md", "")).strip()
+                if not text:
+                    continue
+                counters["text"] += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "heading",
+                        "text_id": f"{document_id}_text_{counters['text']:06d}",
+                        "text": text.lstrip("# ").strip(),
+                        "heading_level": max(
+                            1, min(int(getattr(item, "level", 1) or 1), 6)
+                        ),
+                    }
+                )
+            elif item_type == "table":
+                table_markdown = str(
+                    getattr(item, "md", "") or getattr(item, "csv", "")
+                ).strip()
+                if not table_markdown:
+                    continue
+                counters["table"] += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "table",
+                        "table_id": f"{document_id}_table_{counters['table']:06d}",
+                        "table_markdown": table_markdown,
+                        "table_csv": str(getattr(item, "csv", "") or ""),
+                    }
+                )
+            elif item_type == "image":
+                caption = str(
+                    getattr(item, "caption", "") or getattr(item, "md", "")
+                ).strip()
+                counters["image"] += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "image",
+                        "image_id": f"{document_id}_image_{counters['image']:06d}",
+                        "caption": caption,
+                        "source_url": str(getattr(item, "url", "") or ""),
+                    }
+                )
+            else:
+                text = str(
+                    getattr(item, "value", "") or getattr(item, "md", "")
+                ).strip()
+                if not text:
+                    continue
+                counters["text"] += 1
+                blocks.append(
+                    common
+                    | {
+                        "type": "text",
+                        "text_id": f"{document_id}_text_{counters['text']:06d}",
+                        "text": text,
+                    }
+                )
+    return blocks
 
 
 def extract_document(
     pdf_path: str | Path,
     output_directory: str | Path,
     *,
+    api_key: str,
+    tier: str = "agentic",
+    version: str = "latest",
+    timeout_seconds: float = 600.0,
+    organization_id: str | None = None,
+    project_id: str | None = None,
     document_name: str | None = None,
-    enable_ocr: bool = True,
-    image_scale: float = 2.0,
+    client: Any | None = None,
 ) -> dict[str, Any]:
-    """Extract a PDF to markdown, JSON blocks, images, tables, and metadata."""
+    """Parse a PDF with LlamaCloud and persist normalized extraction artifacts."""
     pdf_path = Path(pdf_path)
     if not pdf_path.is_file():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
     if pdf_path.suffix.lower() != ".pdf":
         raise ValueError(f"Only PDF documents are supported: {pdf_path.name}")
+    if not api_key.strip() and client is None:
+        raise RuntimeError("Missing required LlamaCloud setting: LLAMA_CLOUD_API_KEY")
 
     document_id = create_document_id(pdf_path)
     document_directory = Path(output_directory) / document_id
-    images_directory = document_directory / "images"
-    tables_directory = document_directory / "tables"
-    images_directory.mkdir(parents=True, exist_ok=True)
-    tables_directory.mkdir(parents=True, exist_ok=True)
+    document_directory.mkdir(parents=True, exist_ok=True)
 
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = enable_ocr
-    pipeline_options.generate_picture_images = True
-    pipeline_options.images_scale = image_scale
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-        }
-    )
-    document = converter.convert(pdf_path).document
+    cloud = client or LlamaCloud(api_key=api_key)
+    scope = {
+        key: value
+        for key, value in {
+            "organization_id": organization_id,
+            "project_id": project_id,
+        }.items()
+        if value
+    }
+    try:
+        uploaded_file = cloud.files.create(file=pdf_path, purpose="parse", **scope)
+        result = cloud.parsing.parse(
+            file_id=uploaded_file.id,
+            tier=tier,
+            version=version,
+            expand=["markdown", "text", "items"],
+            timeout=timeout_seconds,
+            **scope,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"LlamaCloud parsing failed: {exc}") from exc
 
-    blocks: list[dict[str, Any]] = []
-    markdown_parts: list[str] = []
-    counters = {"text": 0, "image": 0, "table": 0}
+    markdown_pages = _page_content(result, "markdown", "markdown")
+    text_pages = _page_content(result, "text", "text")
+    markdown = str(getattr(result, "markdown_full", "") or "").strip()
+    text = str(getattr(result, "text_full", "") or "").strip()
+    if not markdown:
+        markdown = "\n\n".join(value for _, value in markdown_pages)
+    if not text:
+        text = "\n\n".join(value for _, value in text_pages)
 
-    for sequence, (item, level) in enumerate(document.iterate_items(), start=1):
-        common = {
-            "block_id": f"{document_id}_block_{sequence:06d}",
-            "document_id": document_id,
-            "sequence": sequence,
-            "page_number": _page_number(item),
-            "bounding_box": _bounding_box(item),
-            "label": _label(item),
-        }
-
-        if isinstance(item, PictureItem):
-            counters["image"] += 1
-            image_id = f"{document_id}_image_{counters['image']:06d}"
-            image_path = images_directory / f"{image_id}.png"
-            image = item.get_image(document)
-            if image is not None:
-                image.save(image_path, format="PNG")
-            blocks.append(
-                common
-                | {
-                    "type": "image",
-                    "image_id": image_id,
-                    "image_filename": image_path.name,
-                    "image_path": str(image_path),
-                }
-            )
-            markdown_parts.append(f'<image-ref id="{image_id}" />')
-        elif isinstance(item, TableItem):
-            counters["table"] += 1
-            table_id = f"{document_id}_table_{counters['table']:06d}"
-            table_path = tables_directory / f"{table_id}.csv"
-            dataframe = item.export_to_dataframe(doc=document)
-            dataframe.to_csv(table_path, index=False)
-            table_markdown = dataframe.to_markdown(index=False)
-            blocks.append(
-                common
-                | {
-                    "type": "table",
-                    "table_id": table_id,
-                    "table_filename": table_path.name,
-                    "table_path": str(table_path),
-                    "table_markdown": table_markdown,
-                }
-            )
-            markdown_parts.extend((f'<table-ref id="{table_id}" />', table_markdown))
-        elif isinstance(item, (SectionHeaderItem, TextItem)):
-            text = item.text.strip()
-            if not text:
-                continue
-            counters["text"] += 1
-            block_type = "heading" if isinstance(item, SectionHeaderItem) else "text"
-            block = common | {
-                "type": block_type,
-                "text_id": f"{document_id}_text_{counters['text']:06d}",
-                "text": text,
-            }
-            if block_type == "heading":
-                block["heading_level"] = max(1, min(int(level or 1), 6))
-                markdown_parts.append(f"{'#' * block['heading_level']} {text}")
-            else:
-                markdown_parts.append(text)
-            blocks.append(block)
+    blocks = _structured_blocks(result, document_id)
+    if not blocks:
+        blocks = _fallback_blocks(markdown_pages or text_pages, document_id)
+    if not blocks:
+        raise RuntimeError("LlamaCloud completed parsing but returned no document content")
 
     paths = {
         "markdown_path": document_directory / "document.md",
+        "text_path": document_directory / "document.txt",
         "blocks_path": document_directory / "blocks.json",
-        "raw_docling_path": document_directory / "docling.json",
+        "raw_llama_cloud_path": document_directory / "llama_cloud.json",
     }
-    paths["markdown_path"].write_text("\n\n".join(markdown_parts), encoding="utf-8")
+    paths["markdown_path"].write_text(markdown, encoding="utf-8")
+    paths["text_path"].write_text(text, encoding="utf-8")
     paths["blocks_path"].write_text(
         json.dumps(blocks, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    paths["raw_docling_path"].write_text(
-        json.dumps(document.export_to_dict(), indent=2, ensure_ascii=False, default=str),
+    paths["raw_llama_cloud_path"].write_text(
+        json.dumps(_model_dump(result), indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
 
     metadata = {
         "document_id": document_id,
         "document_name": document_name or pdf_path.name,
+        "parser": "llama_cloud",
+        "llama_cloud_file_id": str(uploaded_file.id),
+        "llama_cloud_job_id": str(getattr(getattr(result, "job", None), "id", "")),
+        "parse_tier": tier,
+        "parse_version": version,
         **{key: str(value) for key, value in paths.items()},
-        "images_directory": str(images_directory),
-        "tables_directory": str(tables_directory),
         "block_count": len(blocks),
-        "text_count": counters["text"],
-        "image_count": counters["image"],
-        "table_count": counters["table"],
+        "text_count": sum(block["type"] in {"text", "heading"} for block in blocks),
+        "image_count": sum(block["type"] == "image" for block in blocks),
+        "table_count": sum(block["type"] == "table" for block in blocks),
     }
     (document_directory / "document_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"

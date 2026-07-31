@@ -70,9 +70,16 @@ class RAGService:
         namespace: str | None = None,
         document_name: str | None = None,
     ) -> IngestResponse:
+        self.settings.require_llama_cloud()
         metadata = extract_document(
             pdf_path,
             self.settings.data_directory / "documents",
+            api_key=self.settings.llama_cloud_api_key.get_secret_value(),
+            tier=self.settings.llama_parse_tier,
+            version=self.settings.llama_parse_version,
+            timeout_seconds=self.settings.llama_parse_timeout_seconds,
+            organization_id=self.settings.llama_cloud_organization_id or None,
+            project_id=self.settings.llama_cloud_project_id or None,
             document_name=document_name,
         )
         document_directory = Path(metadata["blocks_path"]).parent
