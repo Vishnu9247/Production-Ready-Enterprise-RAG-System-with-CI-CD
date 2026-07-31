@@ -1,0 +1,247 @@
+name: Deploy Backend to Azure Container Apps
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Backend CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-container-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: Production
+
+    env:
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_CONTAINER_APP_NAME: ${{ vars.AZURE_CONTAINER_APP_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT: ${{ vars.AZURE_CONTAINER_APP_ENVIRONMENT }}
+      AZURE_CONTAINER_REGISTRY_NAME: ${{ vars.AZURE_CONTAINER_REGISTRY_NAME || 'backendrag' }}
+
+      APP_ENVIRONMENT: ${{ vars.ENVIRONMENT }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION }}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_OPENAI_EMBEDDING_DEPLOYMENT }}
+      AZURE_OPENAI_CHAT_DEPLOYMENT: ${{ vars.AZURE_OPENAI_CHAT_DEPLOYMENT }}
+      EMBEDDING_DIMENSIONS: ${{ vars.EMBEDDING_DIMENSIONS }}
+      EMBEDDING_BATCH_SIZE: ${{ vars.EMBEDDING_BATCH_SIZE }}
+
+      PINECONE_HOST: ${{ vars.PINECONE_HOST }}
+      PINECONE_INDEX_NAME: ${{ vars.PINECONE_INDEX_NAME }}
+      PINECONE_NAMESPACE: ${{ vars.PINECONE_NAMESPACE }}
+      PINECONE_CLOUD: ${{ vars.PINECONE_CLOUD }}
+      PINECONE_REGION: ${{ vars.PINECONE_REGION }}
+      PINECONE_METRIC: ${{ vars.PINECONE_METRIC }}
+
+      POSTGRES_HOST: ${{ vars.POSTGRES_HOST }}
+      POSTGRES_PORT: ${{ vars.POSTGRES_PORT }}
+      POSTGRES_DATABASE: ${{ vars.POSTGRES_DATABASE }}
+      POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+      POSTGRES_SSLMODE: ${{ vars.POSTGRES_SSLMODE }}
+      POSTGRES_POOL_SIZE: ${{ vars.POSTGRES_POOL_SIZE }}
+      POSTGRES_MAX_OVERFLOW: ${{ vars.POSTGRES_MAX_OVERFLOW }}
+
+      OBJECT_STORAGE_PROVIDER: ${{ vars.OBJECT_STORAGE_PROVIDER }}
+      AZURE_STORAGE_ACCOUNT_URL: ${{ vars.AZURE_STORAGE_ACCOUNT_URL }}
+      AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
+      AZURE_STORAGE_PREFIX: ${{ vars.AZURE_STORAGE_PREFIX }}
+
+      CHUNK_SIZE: ${{ vars.CHUNK_SIZE }}
+      CHUNK_OVERLAP: ${{ vars.CHUNK_OVERLAP }}
+      RETRIEVAL_TOP_K: ${{ vars.RETRIEVAL_TOP_K }}
+      RETRIEVAL_SCORE_THRESHOLD: ${{ vars.RETRIEVAL_SCORE_THRESHOLD }}
+      KEYWORD_SEARCH_TOP_K: ${{ vars.KEYWORD_SEARCH_TOP_K }}
+      SEMANTIC_SEARCH_TOP_K: ${{ vars.SEMANTIC_SEARCH_TOP_K }}
+      HYBRID_RRF_K: ${{ vars.HYBRID_RRF_K }}
+
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      AZURE_STORAGE_ACCOUNT_KEY: ${{ secrets.AZURE_STORAGE_ACCOUNT_KEY }}
+      AZURE_STORAGE_SAS_TOKEN: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          required=(
+            AZURE_RESOURCE_GROUP
+            AZURE_CONTAINER_APP_NAME
+            AZURE_CONTAINER_APP_ENVIRONMENT
+            AZURE_CONTAINER_REGISTRY_NAME
+            AZURE_OPENAI_ENDPOINT
+            PINECONE_HOST
+            POSTGRES_HOST
+            POSTGRES_DATABASE
+            POSTGRES_USER
+            AZURE_STORAGE_ACCOUNT_URL
+            AZURE_STORAGE_CONTAINER
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing GitHub variable: $name"
+              exit 1
+            fi
+          done
+
+          required_secrets=(
+            AZURE_CREDENTIALS
+            AZURE_OPENAI_API_KEY
+            PINECONE_API_KEY
+            POSTGRES_PASSWORD
+          )
+          for name in "${required_secrets[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing GitHub secret: $name"
+              exit 1
+            fi
+          done
+
+      - name: Log in to Azure with service principal
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Resolve Azure Container Registry
+        id: registry
+        shell: bash
+        run: |
+          login_server="$(az acr show \
+            --name "$AZURE_CONTAINER_REGISTRY_NAME" \
+            --query loginServer \
+            --output tsv)"
+          if [[ -z "$login_server" ]]; then
+            echo "::error::Could not resolve ACR login server for $AZURE_CONTAINER_REGISTRY_NAME"
+            exit 1
+          fi
+          echo "login-server=$login_server" >> "$GITHUB_OUTPUT"
+          echo "Using registry: $login_server"
+
+      - name: Build, push, and deploy image
+        uses: azure/container-apps-deploy-action@v1
+        with:
+          appSourcePath: ${{ github.workspace }}
+          dockerfilePath: Dockerfile
+          acrName: ${{ env.AZURE_CONTAINER_REGISTRY_NAME }}
+          imageToBuild: ${{ steps.registry.outputs.login-server }}/enterprise-rag-api:${{ env.DEPLOY_SHA }}
+          containerAppName: ${{ env.AZURE_CONTAINER_APP_NAME }}
+          containerAppEnvironment: ${{ env.AZURE_CONTAINER_APP_ENVIRONMENT }}
+          resourceGroup: ${{ env.AZURE_RESOURCE_GROUP }}
+          ingress: external
+          targetPort: 8000
+          disableTelemetry: true
+
+      - name: Configure Container App secrets and environment
+        shell: bash
+        run: |
+          secret_args=(
+            "azure-openai-api-key=$AZURE_OPENAI_API_KEY"
+            "pinecone-api-key=$PINECONE_API_KEY"
+            "postgres-password=$POSTGRES_PASSWORD"
+          )
+          env_args=(
+            "ENVIRONMENT=${APP_ENVIRONMENT:-production}"
+            "AUTO_INIT_DB=true"
+            "PORT=8000"
+            "AZURE_OPENAI_API_KEY=secretref:azure-openai-api-key"
+            "PINECONE_API_KEY=secretref:pinecone-api-key"
+            "POSTGRES_PASSWORD=secretref:postgres-password"
+          )
+
+          add_env() {
+            local name="$1"
+            local value="${!name:-}"
+            if [[ -n "$value" ]]; then
+              env_args+=("$name=$value")
+            fi
+          }
+
+          if [[ -n "${AZURE_STORAGE_CONNECTION_STRING:-}" ]]; then
+            secret_args+=("azure-storage-connection-string=$AZURE_STORAGE_CONNECTION_STRING")
+            env_args+=("AZURE_STORAGE_CONNECTION_STRING=secretref:azure-storage-connection-string")
+          elif [[ -n "${AZURE_STORAGE_ACCOUNT_KEY:-}" ]]; then
+            secret_args+=("azure-storage-account-key=$AZURE_STORAGE_ACCOUNT_KEY")
+            env_args+=("AZURE_STORAGE_ACCOUNT_KEY=secretref:azure-storage-account-key")
+          elif [[ -n "${AZURE_STORAGE_SAS_TOKEN:-}" ]]; then
+            secret_args+=("azure-storage-sas-token=$AZURE_STORAGE_SAS_TOKEN")
+            env_args+=("AZURE_STORAGE_SAS_TOKEN=secretref:azure-storage-sas-token")
+          fi
+
+          for name in \
+            AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION \
+            AZURE_OPENAI_EMBEDDING_DEPLOYMENT AZURE_OPENAI_CHAT_DEPLOYMENT \
+            EMBEDDING_DIMENSIONS EMBEDDING_BATCH_SIZE \
+            PINECONE_HOST PINECONE_INDEX_NAME PINECONE_NAMESPACE \
+            PINECONE_CLOUD PINECONE_REGION PINECONE_METRIC \
+            POSTGRES_HOST POSTGRES_PORT POSTGRES_DATABASE POSTGRES_USER \
+            POSTGRES_SSLMODE POSTGRES_POOL_SIZE POSTGRES_MAX_OVERFLOW \
+            OBJECT_STORAGE_PROVIDER AZURE_STORAGE_ACCOUNT_URL \
+            AZURE_STORAGE_CONTAINER AZURE_STORAGE_PREFIX \
+            CHUNK_SIZE CHUNK_OVERLAP RETRIEVAL_TOP_K \
+            RETRIEVAL_SCORE_THRESHOLD KEYWORD_SEARCH_TOP_K \
+            SEMANTIC_SEARCH_TOP_K HYBRID_RRF_K
+          do
+            add_env "$name"
+          done
+
+          az containerapp secret set \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --secrets "${secret_args[@]}" \
+            --output none
+
+          az containerapp update \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --set-env-vars "${env_args[@]}" \
+            --min-replicas "${{ vars.AZURE_CONTAINER_APP_MIN_REPLICAS || '1' }}" \
+            --max-replicas "${{ vars.AZURE_CONTAINER_APP_MAX_REPLICAS || '3' }}" \
+            --cpu "${{ vars.AZURE_CONTAINER_APP_CPU || '1.0' }}" \
+            --memory "${{ vars.AZURE_CONTAINER_APP_MEMORY || '2.0Gi' }}" \
+            --output none
+
+      - name: Verify deployed health endpoint
+        shell: bash
+        run: |
+          fqdn="$(az containerapp show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv)"
+
+          for attempt in {1..24}; do
+            if curl --fail --silent --show-error "https://$fqdn/health"; then
+              echo
+              echo "Application URL: https://$fqdn"
+              echo "Swagger UI: https://$fqdn/docs"
+              exit 0
+            fi
+            echo "Waiting for healthy revision ($attempt/24)..."
+            sleep 10
+          done
+
+          echo "::error::The Container App did not become healthy."
+          az containerapp logs show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --tail 100
+          exit 1
