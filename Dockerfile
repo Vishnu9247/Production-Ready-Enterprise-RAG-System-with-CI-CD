@@ -30,6 +30,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        libgl1 \
+        libglib2.0-0 \
+        libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system --gid 10001 rag \
     && useradd --system --uid 10001 --gid rag --home-dir /app rag
 
