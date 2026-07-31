@@ -1,3 +1,7 @@
 temp_data/
 financial_rag_data_pack/
 .env
+Backend/.env
+Backend/data/
+__pycache__/
+.pytest_cache/
