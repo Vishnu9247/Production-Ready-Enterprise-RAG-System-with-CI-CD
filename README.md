@@ -1,6 +1,8 @@
 # Production-Ready Enterprise RAG System
 
-![Enterprise RAG system architecture](docs/assets/enterprise-rag-architecture.png)
+<p align="center">
+  <img src="docs/assets/enterprise-rag-architecture.png" alt="Enterprise RAG system architecture" width="1200">
+</p>
 
 ## Project overview
 
@@ -38,6 +40,24 @@ The project contains a React frontend, a FastAPI backend, cloud storage, hybrid 
 8. The answer, reason, references, and conversation history are returned to the frontend.
 
 Use the same namespace when uploading documents and creating a session. For example, documents uploaded to `production` can be queried by sessions created with the `production` namespace.
+
+## Application screens
+
+### Upload a document
+
+Choose a PDF, enter a namespace, and upload it for parsing, chunking, and indexing.
+
+<p align="center">
+  <img src="docs/assets/ui-upload.png" alt="Document upload screen" width="1000">
+</p>
+
+### Query the documents
+
+Create a session in the same namespace, ask questions, and view the grounded answer, reason, references, and session history.
+
+<p align="center">
+  <img src="docs/assets/ui-query.png" alt="Document query and chat screen" width="1000">
+</p>
 
 ## Technology and services
 
@@ -263,6 +283,10 @@ Open `http://localhost:5173`.
 
 ## Build and deploy with GitHub Actions
 
+<p align="center">
+  <img src="docs/assets/github-actions-workflows.png" alt="Successful GitHub Actions workflows" width="1000">
+</p>
+
 Two workflows are used:
 
 1. **Backend CI** builds the frontend and runs the backend tests.
@@ -292,6 +316,14 @@ backendrag.azurecr.io/enterprise-rag-api:latest
 
 The commit SHA tag is recommended for production because it points to one exact version of the code.
 
+## Monitoring
+
+Grafana can present application data, container health, request activity, and Azure OpenAI token usage in one dashboard. This makes it easier to notice failed requests, resource pressure, unusual model usage, and changes in application activity.
+
+<p align="center">
+  <img src="docs/assets/grafana-dashboard.png" alt="Grafana monitoring dashboard" width="520">
+</p>
+
 ## Azure requirements
 
 Before deploying, make sure:
@@ -316,6 +348,18 @@ docker run --rm -p 8000:8000 --env-file Backend/.env `
 ```
 
 Open `http://localhost:8000/docs` to test the API.
+
+## Future improvements
+
+- **More document formats:** Add first-class support for Word, PowerPoint, Excel, CSV, text, HTML, images, and scanned documents.
+- **Authentication and authorization:** Add Microsoft Entra ID or another OAuth provider, protect the API, and restrict documents and namespaces by user or team.
+- **Database querying:** Add a controlled natural-language database query feature with read-only access, approved schemas, SQL validation, row limits, timeouts, and audit logs.
+- **Document management:** Let users list, replace, re-index, version, and delete uploaded documents.
+- **Background ingestion:** Process large uploads through a job queue and show progress, retries, and failure details in the frontend.
+- **Better retrieval:** Add metadata filters, configurable reranking, query expansion, and support for more retrieval strategies.
+- **Quality evaluation:** Measure retrieval quality, groundedness, citation accuracy, latency, and cost with a repeatable evaluation dataset.
+- **Production security:** Use managed identities and Azure Key Vault, private networking, rate limits, file validation, and malware scanning.
+- **Expanded monitoring:** Add distributed tracing, structured logs, alerts, per-stage latency, and cost dashboards.
 
 ## Security notes
 
